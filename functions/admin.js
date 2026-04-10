@@ -1,0 +1,362 @@
+// ═══ Gumax — Admin Endpoints ═══
+// Manages inventory, margins, and orders
+// Requires ADMIN_API_KEY authentication
+
+function verifyAdminKey(headers) {
+  const authHeader = headers.authorization || '';
+  const token = authHeader.replace('Bearer ', '');
+  return token === process.env.ADMIN_API_KEY;
+}
+
+function rd(val) {
+  return Math.round(val * 100) / 100;
+}
+
+async function getFirestore() {
+  try {
+    const admin = require('firebase-admin');
+    return admin.firestore();
+  } catch (e) {
+    throw new Error('Firebase not initialized');
+  }
+}
+
+exports.handler = async (event) => {
+  const H = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+  };
+
+  if (event.httpMethod === 'OPTIONS') {
+    return { statusCode: 204, headers: H, body: '' };
+  }
+
+  if (event.httpMethod !== 'POST') {
+    return { statusCode: 405, headers: H, body: JSON.stringify({ error: 'POST only' }) };
+  }
+
+  // Verify admin key
+  if (!verifyAdminKey(event.headers)) {
+    return { statusCode: 401, headers: H, body: JSON.stringify({ error: 'Unauthorized' }) };
+  }
+
+  try {
+    const body = JSON.parse(event.body || '{}');
+    const action = event.path?.split('/').pop() || body.action;
+
+    const db = await getFirestore();
+
+    // ═══ UPDATE MARGINS ═══
+    if (action === 'update-margins') {
+      const { margin, categoryMargins } = body;
+
+      if (typeof margin !== 'number' || margin < 0 || margin > 100) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'margin must be 0-100' }) };
+      }
+
+      const updateData = { margin };
+
+      if (categoryMargins && typeof categoryMargins === 'object') {
+        updateData.categoryMargins = categoryMargins;
+      }
+
+      await db.collection('config').doc('store').update(updateData);
+
+      console.log('[Admin] Updated margins:', updateData);
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          message: 'Margins updated',
+          data: updateData
+        })
+      };
+    }
+
+    // ═══ ADD STOCK ═══
+    if (action === 'add-stock') {
+      const { name, wear, float, buyPrice, sellPrice, iconUrl, type, rarity } = body;
+
+      if (!name || !buyPrice) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'name and buyPrice required' }) };
+      }
+
+      const stockId = name.replace(/\s+/g, '_') + '_' + Date.now();
+      const stockData = {
+        name: name,
+        wear: wear || 'Factory New',
+        float: float || null,
+        buyPrice: rd(buyPrice),
+        sellPrice: rd(sellPrice || buyPrice * 1.15),
+        iconUrl: iconUrl || '',
+        type: type || 'Weapon Skin',
+        rarity: rarity || 'Common',
+        addedAt: new Date().toISOString(),
+        addedBy: 'admin'
+      };
+
+      await db.collection('stock').doc(stockId).set(stockData);
+
+      console.log('[Admin] Added stock:', stockId, stockData);
+
+      return {
+        statusCode: 201,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          message: 'Item added to stock',
+          itemId: stockId,
+          data: stockData
+        })
+      };
+    }
+
+    // ═══ REMOVE STOCK ═══
+    if (action === 'remove-stock') {
+      const { itemId } = body;
+
+      if (!itemId) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'itemId required' }) };
+      }
+
+      await db.collection('stock').doc(itemId).delete();
+
+      console.log('[Admin] Removed stock:', itemId);
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          message: 'Item removed from stock',
+          itemId: itemId
+        })
+      };
+    }
+
+    // ═══ LIST ORDERS ═══
+    if (action === 'orders') {
+      const { status, steamId, limit = 50, offset = 0 } = body;
+
+      let query = db.collection('orders');
+
+      if (status) {
+        query = query.where('status', '==', status);
+      }
+
+      if (steamId) {
+        query = query.where('user.steamId', '==', steamId);
+      }
+
+      query = query.orderBy('createdAt', 'desc').limit(limit).offset(offset);
+
+      const snapshot = await query.get();
+      const orders = [];
+
+      snapshot.forEach(doc => {
+        orders.push({
+          orderId: doc.id,
+          ...doc.data()
+        });
+      });
+
+      console.log(`[Admin] Listed ${orders.length} orders (status: ${status || 'all'}, offset: ${offset})`);
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          orders: orders,
+          count: orders.length,
+          limit: limit,
+          offset: offset
+        })
+      };
+    }
+
+    // ═══ UPDATE ORDER STATUS ═══
+    if (action === 'update-order-status') {
+      const { orderId, status, notes } = body;
+
+      if (!orderId || !status) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'orderId and status required' }) };
+      }
+
+      const validStatuses = ['pending', 'paid', 'processing', 'shipped', 'delivered', 'cancelled'];
+      if (!validStatuses.includes(status)) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'Invalid status: ' + status }) };
+      }
+
+      const orderRef = db.collection('orders').doc(orderId);
+      const orderDoc = await orderRef.get();
+
+      if (!orderDoc.exists) {
+        return { statusCode: 404, headers: H, body: JSON.stringify({ error: 'Order not found' }) };
+      }
+
+      const updateData = { status };
+
+      if (status === 'delivered') {
+        updateData.deliveredAt = new Date().toISOString();
+      }
+
+      if (status === 'paid') {
+        updateData.paidAt = new Date().toISOString();
+      }
+
+      if (notes) {
+        updateData.notes = notes;
+      }
+
+      await orderRef.update(updateData);
+
+      console.log('[Admin] Updated order', orderId, 'to', status);
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          message: 'Order updated',
+          orderId: orderId,
+          status: status,
+          data: updateData
+        })
+      };
+    }
+
+    // ═══ GET STOCK LIST ═══
+    if (action === 'stock') {
+      const { limit = 100, offset = 0 } = body;
+
+      const snapshot = await db.collection('stock')
+        .orderBy('addedAt', 'desc')
+        .limit(limit)
+        .offset(offset)
+        .get();
+
+      const items = [];
+
+      snapshot.forEach(doc => {
+        items.push({
+          itemId: doc.id,
+          ...doc.data()
+        });
+      });
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          items: items,
+          count: items.length,
+          limit: limit,
+          offset: offset
+        })
+      };
+    }
+
+    // ═══ GET STORE CONFIG ═══
+    if (action === 'config') {
+      const configDoc = await db.collection('config').doc('store').get();
+      const config = configDoc.data() || {};
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          config: config
+        })
+      };
+    }
+
+    // ═══ UPDATE STORE CONFIG ═══
+    if (action === 'update-config') {
+      const { name, logo, whatsapp, instagram, deliveryFullTime, deliveryNormalTime } = body;
+
+      const updateData = {};
+
+      if (name) updateData.name = name;
+      if (logo) updateData.logo = logo;
+      if (whatsapp) updateData.whatsapp = whatsapp;
+      if (instagram) updateData.instagram = instagram;
+      if (deliveryFullTime !== undefined) updateData.deliveryFullTime = deliveryFullTime;
+      if (deliveryNormalTime !== undefined) updateData.deliveryNormalTime = deliveryNormalTime;
+
+      if (Object.keys(updateData).length === 0) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'No fields to update' }) };
+      }
+
+      await db.collection('config').doc('store').update(updateData);
+
+      console.log('[Admin] Updated config:', updateData);
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          message: 'Config updated',
+          data: updateData
+        })
+      };
+    }
+
+    // ═══ GET ORDER STATS ═══
+    if (action === 'stats') {
+      // Get orders from last 30 days
+      const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+      const snapshot = await db.collection('orders')
+        .where('createdAt', '>=', thirtyDaysAgo)
+        .get();
+
+      let totalRevenue = 0;
+      let totalOrders = 0;
+      const statusCounts = {};
+
+      snapshot.forEach(doc => {
+        const order = doc.data();
+        totalOrders++;
+        totalRevenue += order.total || 0;
+
+        if (!statusCounts[order.status]) {
+          statusCounts[order.status] = 0;
+        }
+        statusCounts[order.status]++;
+      });
+
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          stats: {
+            period: '30 days',
+            totalOrders: totalOrders,
+            totalRevenue: rd(totalRevenue),
+            averageOrderValue: totalOrders > 0 ? rd(totalRevenue / totalOrders) : 0,
+            statusBreakdown: statusCounts
+          }
+        })
+      };
+    }
+
+    return {
+      statusCode: 400,
+      headers: H,
+      body: JSON.stringify({ error: 'Unknown action: ' + action })
+    };
+
+  } catch (e) {
+    console.error('[Admin] Error:', e.message);
+    return { statusCode: 500, headers: H, body: JSON.stringify({ error: e.message }) };
+  }
+};
