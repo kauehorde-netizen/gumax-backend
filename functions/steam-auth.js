@@ -140,7 +140,20 @@ exports.handler = async (event) => {
           // Don't fail auth if Firestore fails
         }
 
-        return json(200, { success: true, steamId });
+        // Gera Firebase custom token pra analise.html logar com signInWithCustomToken
+        let firebaseCustomToken = null;
+        try {
+          const admin = require('firebase-admin');
+          // Usa o steamId como uid no Firebase Auth — mesmo doc de /users/{steamId}
+          firebaseCustomToken = await admin.auth().createCustomToken(steamId, {
+            provider: 'steam',
+            steamId,
+          });
+        } catch (e) {
+          console.log('[Steam Auth] customToken error:', e.message);
+        }
+
+        return json(200, { success: true, steamId, firebaseCustomToken });
       } else {
         console.log(`[Steam Auth] Verification failed: ${verifyRes.body.substring(0, 200)}`);
         return json(401, { success: false, error: 'Steam verification failed' });
