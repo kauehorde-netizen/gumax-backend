@@ -116,6 +116,12 @@ const createOrderHandler = require('./functions/create-order').handler;
 const checkPixHandler = require('./functions/check-pix').handler;
 const exchangeRateHandler = require('./functions/exchange-rate').handler;
 const adminHandler = require('./functions/admin').handler;
+const creditsHandler = require('./functions/credits').handler;
+const analysisHandler = require('./functions/analysis').handler;
+const subscriptionHandler = require('./functions/subscription').handler;
+const creditsPurchaseHandler = require('./functions/credits-purchase').handler;
+const { processShieldRefunds } = require('./functions/analysis');
+const { distributeMonthlyCredits } = require('./functions/subscription');
 
 // ── Routes (with rate limiting) ──
 
@@ -152,6 +158,43 @@ app.options('/api/check-pix', (req, res) => res.sendStatus(204));
 app.get('/api/exchange-rate', rateLimit(60000, 30), wrapHandler(exchangeRateHandler));
 app.options('/api/exchange-rate', (req, res) => res.sendStatus(204));
 
+// Credits endpoints: authenticated per user; moderate rate limits
+app.get('/api/credits/balance', rateLimit(60000, 60), wrapHandler(creditsHandler));
+app.post('/api/credits/balance', rateLimit(60000, 60), wrapHandler(creditsHandler));
+app.post('/api/credits/grant-initial', rateLimit(60000, 5), wrapHandler(creditsHandler));
+app.post('/api/credits/consume', rateLimit(60000, 60), wrapHandler(creditsHandler));
+app.post('/api/credits/award', rateLimit(60000, 20), wrapHandler(creditsHandler));
+app.options('/api/credits/*', (req, res) => res.sendStatus(204));
+
+// Skin analysis: paid tiers debit credits atomically; cache 15min
+app.post('/api/analysis', rateLimit(60000, 30), wrapHandler(analysisHandler));
+app.options('/api/analysis', (req, res) => res.sendStatus(204));
+
+// ── Subscription (Gumax Pro) ──
+app.get('/api/subscription/plans', rateLimit(60000, 60), wrapHandler(subscriptionHandler));
+app.get('/api/subscription/status', rateLimit(60000, 60), wrapHandler(subscriptionHandler));
+app.post('/api/subscription/create', rateLimit(60000, 10), wrapHandler(subscriptionHandler));
+app.post('/api/subscription/cancel', rateLimit(60000, 10), wrapHandler(subscriptionHandler));
+app.post('/api/subscription/webhook', wrapHandler(subscriptionHandler)); // sem rate limit — MP
+app.post('/api/subscription/distribute', rateLimit(60000, 5), wrapHandler(subscriptionHandler));
+app.options('/api/subscription/*', (req, res) => res.sendStatus(204));
+
+// ── Credit purchases (pacotes avulsos via PIX) ──
+app.get('/api/credits/packages', rateLimit(60000, 60), wrapHandler(creditsPurchaseHandler));
+app.post('/api/credits/purchase', rateLimit(60000, 20), wrapHandler(creditsPurchaseHandler));
+app.post('/api/credits/purchase/webhook', wrapHandler(creditsPurchaseHandler)); // sem rate limit — MP
+app.options('/api/credits/purchase', (req, res) => res.sendStatus(204));
+
+// ── Gumax Shield cron (admin-only trigger) ──
+app.post('/api/shield/process', rateLimit(60000, 5), async (req, res) => {
+  const key = req.headers['x-admin-key'];
+  if (key !== process.env.ADMIN_API_KEY) return res.status(401).json({ error: 'admin key required' });
+  try {
+    const result = await processShieldRefunds();
+    res.json(result);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Admin endpoints: 20 per minute (requires API key)
 app.post('/api/admin/update-margins', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/add-stock', rateLimit(60000, 20), wrapHandler(adminHandler));
@@ -174,9 +217,27 @@ app.get('/api/proxy-image', rateLimit(60000, 100), async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Background jobs ──
+// Shield: roda a cada hora pra processar refunds de janelas expiradas
+// Subscription: roda a cada 6h pra distribuir 200 créditos a quem chegou na data
+setInterval(async () => {
+  try {
+    const r = await processShieldRefunds();
+    if (r.processed > 0) console.log(`[Shield] processed=${r.processed} refunded=${r.refunded}`);
+  } catch (e) { console.error('[Shield cron]', e.message); }
+}, 60 * 60 * 1000); // 1h
+
+setInterval(async () => {
+  try {
+    const r = await distributeMonthlyCredits();
+    if (r.total > 0) console.log(`[Subscription] distributed=${r.distributed}/${r.total}`);
+  } catch (e) { console.error('[Subscription cron]', e.message); }
+}, 6 * 60 * 60 * 1000); // 6h
+
 // ── Start server ──
 app.listen(PORT, () => {
   console.log(`[Server] Gumax Skins API running on port ${PORT}`);
   console.log(`[Server] Routes: /api/catalog, /api/skin-detail, /api/skin-icon, /api/create-order, /api/check-pix`);
-  console.log(`[Server] Admin: /api/admin/update-margins, /api/admin/add-stock, /api/admin/orders`);
+  console.log(`[Server] Credits: /api/credits/* , /api/analysis , /api/subscription/*`);
+  console.log(`[Server] Admin: /api/admin/update-margins, /api/admin/add-stock, /api/admin/orders, /api/shield/process`);
 });
