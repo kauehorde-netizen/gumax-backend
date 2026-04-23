@@ -310,7 +310,6 @@ exports.handler = async (event) => {
     }
 
     // ═══ GET PRICING CONFIG ═══
-    // Retorna { mode, fixedRate, surcharge } + cotação atual pra preview.
     if (action === 'get-pricing') {
       const { getPricingConfig } = require('./pricing');
       const { fetchExchangeRate, getRateCache } = require('./exchange-rate');
@@ -319,8 +318,10 @@ exports.handler = async (event) => {
         fetchExchangeRate().catch(() => 0),
       ]);
       const cache = getRateCache();
-      const baseFactor = cfg.mode === 'rate' ? googleRate : cfg.fixedRate;
-      const saleFactor = cfg.mode === 'rate' ? baseFactor + (cfg.surcharge || 0) : cfg.fixedRate;
+      const baseRate = googleRate > 0 ? googleRate : cfg.fallbackRate;
+      const saleFactor = cfg.mode === 'percent'
+        ? baseRate * (1 + (cfg.marginPct || 0) / 100)
+        : baseRate + (cfg.surchargeBRL || 0);
       return {
         statusCode: 200,
         headers: H,
@@ -332,7 +333,7 @@ exports.handler = async (event) => {
           rateSource: cache.source,
           preview: {
             youpinCNY: 100,
-            originalBRL: Math.round(100 * baseFactor * 100) / 100,
+            originalBRL: Math.round(100 * baseRate * 100) / 100,
             saleBRL: Math.round(100 * saleFactor * 100) / 100,
           },
         }),
@@ -340,12 +341,12 @@ exports.handler = async (event) => {
     }
 
     // ═══ UPDATE PRICING CONFIG ═══
-    // body: { mode?, fixedRate?, surcharge? }
+    // body: { mode?, surchargeBRL?, marginPct? }
     if (action === 'update-pricing') {
       const { setPricingConfig } = require('./pricing');
-      const { mode, fixedRate, surcharge } = body;
+      const { mode, surchargeBRL, marginPct } = body;
       try {
-        const cfg = await setPricingConfig({ mode, fixedRate, surcharge }, 'admin');
+        const cfg = await setPricingConfig({ mode, surchargeBRL, marginPct }, 'admin');
         console.log('[Admin] Updated pricing:', cfg);
         return {
           statusCode: 200,
