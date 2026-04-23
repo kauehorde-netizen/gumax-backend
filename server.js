@@ -81,6 +81,7 @@ function wrapHandler(handler) {
     try {
       const event = {
         httpMethod: req.method,
+        path: req.path,
         body: JSON.stringify(req.body),
         queryStringParameters: req.query,
         headers: req.headers,
