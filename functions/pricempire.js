@@ -287,7 +287,7 @@ function buildIconUrl(iconField) {
   return `https://community.cloudflare.steamstatic.com/economy/image/${iconField}/360fx360f`;
 }
 
-// Sugestões pra autocomplete — top N nomes que contenham as palavras da query
+// Sugestões pra autocomplete — só armas, facas e luvas (sem sticker/patch/case/music kit).
 async function suggestSkins(query, limit = 10) {
   const items = await fetchPricempireItems();
   const q = normalizeName(query);
@@ -295,6 +295,7 @@ async function suggestSkins(query, limit = 10) {
   const words = q.split(' ');
   const matches = [];
   for (const key of Object.keys(items)) {
+    if (!isWeaponOrKnifeOrGloves(key)) continue;  // filtro anti-sticker
     const k = normalizeName(key);
     if (words.every(w => k.includes(w))) {
       matches.push({ name: key, score: Math.abs(k.length - q.length) });
