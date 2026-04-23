@@ -273,6 +273,8 @@ app.post('/api/admin/add-stock', rateLimit(60000, 20), wrapHandler(adminHandler)
 app.post('/api/admin/remove-stock', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/orders', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/update-order-status', rateLimit(60000, 20), wrapHandler(adminHandler));
+app.post('/api/admin/get-pricing', rateLimit(60000, 30), wrapHandler(adminHandler));
+app.post('/api/admin/update-pricing', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.options('/api/admin/*', (req, res) => res.sendStatus(204));
 
 // Image proxy: 100 per minute (used for displaying skins)
@@ -325,6 +327,23 @@ function schedulePricempirePrewarm() {
   setInterval(prewarm, 12 * 60 * 60 * 1000);
 }
 schedulePricempirePrewarm();
+
+// Exchange rate: pré-aquece no boot + refresh a cada 5 min.
+// Assim a primeira request de preço não precisa esperar o Google Finance.
+function scheduleExchangeRateRefresh() {
+  const exchangeMod = safeRequire('./functions/exchange-rate', 'exchange-rate');
+  if (!exchangeMod || !exchangeMod.fetchExchangeRate) return;
+  const refresh = async () => {
+    try {
+      const rate = await exchangeMod.fetchExchangeRate();
+      const cache = exchangeMod.getRateCache();
+      console.log(`[Rate cron] CNY→BRL=${rate} (source=${cache.source})`);
+    } catch (e) { console.error('[Rate cron]', e.message); }
+  };
+  setTimeout(refresh, 10 * 1000);          // 10s após boot
+  setInterval(refresh, 5 * 60 * 1000);     // a cada 5 min
+}
+scheduleExchangeRateRefresh();
 
 // Price History: snapshot diário do catálogo Skinport → Firestore.
 // Rodamos 1x/dia às ~03h UTC; se o servidor reiniciar, roda de novo no próximo tick.
