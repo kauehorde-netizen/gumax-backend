@@ -15,10 +15,14 @@
 const { fetchExchangeRate } = require('./exchange-rate');
 
 // Defaults se o doc settings/pricing não existir
+// MODELO:
+//   fixed → fator_final = fixedRate (user escolhe direto o R$/¥ final)
+//   rate  → fator_final = googleRate + surcharge (cotação ao vivo + R$ fixos de lucro)
 const DEFAULTS = Object.freeze({
-  mode: 'fixed',     // 'fixed' | 'rate'
-  fixedRate: 0.78,   // BRL por CNY — valor com que o Gu trabalha
-  margin: 0.10,      // +10% sobre youpin
+  mode: 'fixed',       // 'fixed' | 'rate'
+  fixedRate: 0.78,     // BRL por CNY — usado no modo fixed
+  surcharge: 0.04,     // R$ extras somados à cotação — usado no modo rate
+  margin: 0,           // DEPRECATED — mantido pra retro-compat, não aplicado
 });
 
 // Cache em memória da config (TTL 1 min — admin muda raro, mas propaga rápido)
@@ -38,8 +42,10 @@ async function getPricingConfig(forceRefresh = false) {
     if (!['fixed', 'rate'].includes(data.mode)) data.mode = DEFAULTS.mode;
     const fr = parseFloat(data.fixedRate);
     data.fixedRate = (fr > 0 && fr < 5) ? fr : DEFAULTS.fixedRate;
-    const mg = parseFloat(data.margin);
-    data.margin = (mg >= 0 && mg < 1) ? mg : DEFAULTS.margin;
+    const sc = parseFloat(data.surcharge);
+    data.surcharge = (sc >= 0 && sc < 2) ? sc : DEFAULTS.surcharge;
+    // margin deprecated — sempre 0
+    data.margin = 0;
     configCache = { data, ts: Date.now() };
     return data;
   } catch (e) {
@@ -48,7 +54,7 @@ async function getPricingConfig(forceRefresh = false) {
   }
 }
 
-async function setPricingConfig({ mode, fixedRate, margin }, updatedBy = 'admin') {
+async function setPricingConfig({ mode, fixedRate, surcharge }, updatedBy = 'admin') {
   const admin = require('firebase-admin');
   const db = admin.firestore();
   const patch = { updatedAt: new Date().toISOString(), updatedBy };
@@ -61,18 +67,35 @@ async function setPricingConfig({ mode, fixedRate, margin }, updatedBy = 'admin'
     if (!(fr > 0 && fr < 5)) throw new Error('fixedRate must be between 0 and 5');
     patch.fixedRate = fr;
   }
-  if (margin !== undefined) {
-    const mg = parseFloat(margin);
-    if (!(mg >= 0 && mg < 1)) throw new Error('margin must be between 0 and 0.99');
-    patch.margin = mg;
+  if (surcharge !== undefined) {
+    const sc = parseFloat(surcharge);
+    if (!(sc >= 0 && sc < 2)) throw new Error('surcharge must be between 0 and 2 R$');
+    patch.surcharge = sc;
   }
   await db.collection('settings').doc('pricing').set(patch, { merge: true });
   configCache = { data: null, ts: 0 }; // invalida cache
   return getPricingConfig(true);
 }
 
-// Retorna o fator BRL/CNY atual (respeitando o modo selecionado)
+// Retorna o fator FINAL BRL/CNY já com o lucro aplicado (usado pra preço de venda).
+//   fixed → fixedRate (user escolheu direto)
+//   rate  → googleRate + surcharge (cotação + R$ fixos)
 async function getConversionFactor() {
+  const cfg = await getPricingConfig();
+  if (cfg.mode === 'rate') {
+    try {
+      const rate = await fetchExchangeRate();
+      return rate > 0 ? rate + (cfg.surcharge || 0) : cfg.fixedRate;
+    } catch {
+      return cfg.fixedRate;
+    }
+  }
+  return cfg.fixedRate;
+}
+
+// Fator bruto (sem o surcharge). Usado pro strikethrough do preço Steam
+// que não deve incluir lucro.
+async function getBaseFactor() {
   const cfg = await getPricingConfig();
   if (cfg.mode === 'rate') {
     try {
@@ -85,30 +108,31 @@ async function getConversionFactor() {
   return cfg.fixedRate;
 }
 
-// Converte preço CNY → BRL de venda (com margem aplicada)
+// Converte preço CNY → BRL de venda (já com lucro aplicado)
 async function salePriceBRL(cny) {
-  if (!cny || cny <= 0) return 0;
-  const cfg = await getPricingConfig();
-  const factor = await getConversionFactor();
-  return Math.round(cny * factor * (1 + cfg.margin) * 100) / 100;
-}
-
-// Converte preço CNY → BRL "original" (sem margem, pro valor strikethrough)
-async function originalPriceBRL(cny) {
   if (!cny || cny <= 0) return 0;
   const factor = await getConversionFactor();
   return Math.round(cny * factor * 100) / 100;
 }
 
-// Versão síncrona pra quando já temos o factor/config em mãos (ex: loop de top-sellers)
-function applyPricing(cny, factor, margin = 0) {
+// Converte preço CNY → BRL "original" (sem lucro, pro valor strikethrough)
+async function originalPriceBRL(cny) {
   if (!cny || cny <= 0) return 0;
-  return Math.round(cny * factor * (1 + margin) * 100) / 100;
+  const factor = await getBaseFactor();
+  return Math.round(cny * factor * 100) / 100;
+}
+
+// Versão síncrona pra quando já temos o factor em mãos (ex: loop de top-sellers).
+// O factor passado já deve estar com o lucro aplicado quando apropriado.
+function applyPricing(cny, factor) {
+  if (!cny || cny <= 0) return 0;
+  return Math.round(cny * factor * 100) / 100;
 }
 
 exports.getPricingConfig = getPricingConfig;
 exports.setPricingConfig = setPricingConfig;
 exports.getConversionFactor = getConversionFactor;
+exports.getBaseFactor = getBaseFactor;
 exports.salePriceBRL = salePriceBRL;
 exports.originalPriceBRL = originalPriceBRL;
 exports.applyPricing = applyPricing;
