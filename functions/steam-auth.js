@@ -77,7 +77,42 @@ exports.handler = async (event) => {
       return json(200, { loginUrl });
     }
 
-    return json(400, { error: 'Missing action parameter' });
+    // Resolve vanity URL (ex: "gumaxskins" → "76561198...")
+    if (action === 'resolve-vanity') {
+      const vanity = (params.name || '').trim();
+      if (!vanity) return json(400, { error: 'name required' });
+      const apiKey = process.env.STEAM_API_KEY;
+      if (!apiKey) return json(500, { error: 'STEAM_API_KEY not configured' });
+      try {
+        const url = `https://api.steampowered.com/ISteamUser/ResolveVanityURL/v0001/?key=${apiKey}&vanityurl=${encodeURIComponent(vanity)}`;
+        const res = await httpGet(url);
+        if (res.status !== 200) return json(502, { error: 'steam_api_error', status: res.status });
+        const data = JSON.parse(res.body);
+        const r = data?.response;
+        if (r?.success === 1 && r?.steamid) {
+          // Também busca o perfil resumido
+          let profile = null;
+          try {
+            const summUrl = `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${apiKey}&steamids=${r.steamid}`;
+            const summ = await httpGet(summUrl);
+            if (summ.status === 200) {
+              const sd = JSON.parse(summ.body);
+              profile = sd?.response?.players?.[0] || null;
+            }
+          } catch {}
+          return json(200, {
+            success: true, vanity, steamId: r.steamid,
+            profileName: profile?.personaname || null,
+            avatar: profile?.avatarfull || null,
+          });
+        }
+        return json(404, { success: false, error: 'vanity_not_found', vanity });
+      } catch (e) {
+        return json(500, { error: e.message });
+      }
+    }
+
+    return json(400, { error: 'Missing or invalid action parameter' });
   }
 
   // POST: Verify Steam callback
