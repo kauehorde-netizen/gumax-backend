@@ -124,6 +124,7 @@ const creditsPurchaseHandler = require('./functions/credits-purchase').handler;
 const skinportHandler = require('./functions/skinport').handler;
 const steamMarketHandler = require('./functions/steam-market').handler;
 const priceHistoryHandler = require('./functions/price-history').handler;
+const steamInventoryHandler = require('./functions/steam-inventory').handler;
 const { processShieldRefunds } = require('./functions/analysis');
 const { distributeMonthlyCredits } = require('./functions/subscription');
 const { snapshotDailyPrices } = require('./functions/price-history');
@@ -144,7 +145,9 @@ app.options('/api/skin-icon', (req, res) => res.sendStatus(204));
 
 // Youpin proxy: 30 per minute
 app.post('/api/youpin-proxy', rateLimit(60000, 30), wrapHandler(youpinProxyHandler));
+app.get('/api/youpin/top-sellers', rateLimit(60000, 60), wrapHandler(youpinProxyHandler));
 app.options('/api/youpin-proxy', (req, res) => res.sendStatus(204));
+app.options('/api/youpin/*', (req, res) => res.sendStatus(204));
 
 // Steam auth: 20 per minute
 app.get('/api/steam-auth', rateLimit(60000, 20), wrapHandler(steamAuthHandler));
@@ -215,6 +218,10 @@ app.post('/api/shield/process', rateLimit(60000, 5), async (req, res) => {
     res.json(result);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// Admin: sync de inventário Steam (pesado — 3 por minuto)
+app.post('/api/admin/sync-inventory', rateLimit(60000, 3), wrapHandler(steamInventoryHandler));
+app.options('/api/admin/sync-inventory', (req, res) => res.sendStatus(204));
 
 // Admin endpoints: 20 per minute (requires API key)
 app.post('/api/admin/update-margins', rateLimit(60000, 20), wrapHandler(adminHandler));
