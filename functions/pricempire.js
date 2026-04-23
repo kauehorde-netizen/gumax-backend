@@ -47,19 +47,21 @@ function json(code, body) {
 
 // Normaliza: {item_name: {buff163: {price, count}, youpin: {price, count}, ...}}
 // → {item_name: {buff: 12.34, youpin: 11.90, ...}, market_hash_name, ...}
-// O Gumax usa nomes simplificados (buff em vez de buff163) pra compatibilidade.
+// IMPORTANTE: Pricempire v4 paid retorna preço em CENTAVOS. Dividimos por 100.
 function normalizeV4Item(marketHashName, priceMap) {
   const flat = { market_hash_name: marketHashName };
   const mapKey = { buff163: 'buff', youpin: 'youpin', steam: 'steam', csfloat: 'csfloat', c5game: 'c5game', csmoney: 'csmoney' };
   for (const [src, mapped] of Object.entries(mapKey)) {
     const entry = priceMap[src];
-    if (entry && entry.price != null) flat[mapped] = entry.price;
+    if (entry && entry.price != null) flat[mapped] = entry.price / 100;
   }
   return flat;
 }
 
 // Cache no Firestore — persiste entre restarts do Railway e compartilhado entre instâncias
 const FIRESTORE_CACHE_DOC = { col: 'cached_prices', id: 'pricempire_top_sellers' };
+// Schema version — incrementa quando mudar estrutura de dados pra invalidar cache antigo
+const CACHE_SCHEMA_VERSION = 2; // v2: preços em CNY (divididos por 100, fix de centavos)
 // Como o payload é grande (~25k items), salvamos chunks em subcolection
 async function loadFromFirestoreCache() {
   try {
@@ -69,6 +71,11 @@ async function loadFromFirestoreCache() {
     if (!mainDoc.exists) return null;
     const meta = mainDoc.data();
     if (!meta || !meta.ts || !meta.chunks) return null;
+    // Invalida se schema version do cache não bate com o atual (ex: fix de centavos)
+    if (meta.schemaVersion !== CACHE_SCHEMA_VERSION) {
+      console.log(`[Pricempire] Firestore cache schema v${meta.schemaVersion} != v${CACHE_SCHEMA_VERSION} — ignorando`);
+      return null;
+    }
     // Cache válido por até 25h (safe margin em cima do cron 24h)
     if (Date.now() - meta.ts > 25 * 60 * 60 * 1000) return null;
 
@@ -112,6 +119,7 @@ async function saveToFirestoreCache(byName, version) {
     await db.collection(FIRESTORE_CACHE_DOC.col).doc(FIRESTORE_CACHE_DOC.id).set({
       ts: Date.now(),
       version: version || 'v4paid',
+      schemaVersion: CACHE_SCHEMA_VERSION,
       chunks: chunkCount,
       count: names.length,
       updatedAt: new Date().toISOString(),
