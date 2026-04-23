@@ -113,6 +113,27 @@ exports.handler = async (event) => {
       if (verifyRes.body.includes('is_valid:true')) {
         console.log(`[Steam Auth] Verified Steam ID: ${steamId}`);
 
+        // Tenta buscar nome + avatar do perfil público Steam (se STEAM_API_KEY existir)
+        let steamName = '';
+        let steamAvatar = '';
+        const steamApiKey = process.env.STEAM_API_KEY;
+        if (steamApiKey) {
+          try {
+            const profileUrl = `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${steamApiKey}&steamids=${steamId}`;
+            const profileRes = await httpGet(profileUrl);
+            if (profileRes.status === 200) {
+              const profile = JSON.parse(profileRes.body);
+              const player = profile?.response?.players?.[0];
+              if (player) {
+                steamName = player.personaname || '';
+                steamAvatar = player.avatarfull || player.avatarmedium || player.avatar || '';
+              }
+            }
+          } catch (e) {
+            console.log('[Steam Auth] GetPlayerSummaries error:', e.message);
+          }
+        }
+
         // Try to log user to Firestore
         try {
           const admin = require('firebase-admin');
@@ -121,19 +142,21 @@ exports.handler = async (event) => {
           const userDoc = await userRef.get();
 
           if (!userDoc.exists) {
-            // New user
             await userRef.set({
-              steamId: steamId,
+              steamId,
+              steamName: steamName || `Steam ${steamId.slice(-4)}`,
+              steamAvatar,
               createdAt: new Date().toISOString(),
               lastLogin: new Date().toISOString(),
               orders: []
             });
-            console.log(`[Steam Auth] Created new user: ${steamId}`);
+            console.log(`[Steam Auth] Created new user: ${steamId} (${steamName || 'no name'})`);
           } else {
-            // Update last login
-            await userRef.update({
-              lastLogin: new Date().toISOString()
-            });
+            // Atualiza nome/avatar se conseguiu puxar da Steam (usuário pode ter trocado)
+            const patch = { lastLogin: new Date().toISOString() };
+            if (steamName) patch.steamName = steamName;
+            if (steamAvatar) patch.steamAvatar = steamAvatar;
+            await userRef.update(patch);
           }
         } catch (e) {
           console.log('[Steam Auth] Firestore write error:', e.message);
