@@ -89,6 +89,57 @@ exports.handler = async (event) => {
       return json(400, { error: 'Invalid JSON' });
     }
 
+    // Action "refresh-profile": re-busca nome + avatar da Steam pra um user já logado.
+    // Requer Firebase ID token no Authorization header.
+    if (body.action === 'refresh-profile') {
+      const authHeader = event.headers?.authorization || event.headers?.Authorization;
+      if (!authHeader || !authHeader.toLowerCase().startsWith('bearer ')) {
+        return json(401, { error: 'Bearer token required' });
+      }
+      const idToken = authHeader.slice(7);
+      let decoded;
+      try {
+        const admin = require('firebase-admin');
+        decoded = await admin.auth().verifyIdToken(idToken);
+      } catch (e) {
+        return json(401, { error: 'Invalid token' });
+      }
+      const steamId = decoded.uid;
+      if (!/^\d{17}$/.test(steamId)) {
+        return json(400, { error: 'Not a Steam user (uid is not a steamId)' });
+      }
+
+      const steamApiKey = process.env.STEAM_API_KEY;
+      if (!steamApiKey) {
+        return json(500, { error: 'STEAM_API_KEY not configured' });
+      }
+
+      try {
+        const profileRes = await httpGet(
+          `https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=${steamApiKey}&steamids=${steamId}`
+        );
+        if (profileRes.status !== 200) {
+          return json(502, { error: 'Steam API error', status: profileRes.status });
+        }
+        const profile = JSON.parse(profileRes.body);
+        const player = profile?.response?.players?.[0];
+        if (!player) return json(404, { error: 'Steam profile not found' });
+
+        const steamName = player.personaname || `Steam ${steamId.slice(-4)}`;
+        const steamAvatar = player.avatarfull || player.avatarmedium || player.avatar || '';
+
+        const admin = require('firebase-admin');
+        const db = admin.firestore();
+        await db.collection('users').doc(steamId).set({
+          steamName, steamAvatar, lastLogin: new Date().toISOString(),
+        }, { merge: true });
+
+        return json(200, { success: true, steamName, steamAvatar, steamId });
+      } catch (e) {
+        return json(500, { error: 'refresh error: ' + e.message });
+      }
+    }
+
     if (body.action !== 'verify' || !body.params) {
       return json(400, { error: 'Missing action or params' });
     }
