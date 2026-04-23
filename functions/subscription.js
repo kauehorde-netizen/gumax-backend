@@ -261,9 +261,9 @@ async function handleWebhook(event) {
     return json(200, { received: true, subscription: doc.id, status: localStatus });
   }
 
-  // --- payment event: cobrança mensal efetivada (ou falhada) ---
+  // --- payment event: pode ser assinatura OU compra avulsa de créditos ---
+  // (usamos UMA URL só no MP — esse webhook roteia internamente)
   if (type === 'payment') {
-    // Buscamos o pagamento para saber se é de uma assinatura
     const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
     const resp = await fetch(`https://api.mercadopago.com/v1/payments/${dataId}`, {
       headers: { Authorization: `Bearer ${MP_TOKEN}` },
@@ -271,7 +271,22 @@ async function handleWebhook(event) {
     if (!resp.ok) return json(200, { received: true });
     const pay = await resp.json();
 
-    // Se o pagamento for de uma assinatura (preapproval_id presente)
+    // Fan-out: é compra avulsa de créditos? (metadata bucket ou external_reference existe em credit_purchases)
+    const isBucketPurchase = pay.metadata?.bucket === 'credit_purchase';
+    const extRef = pay.external_reference;
+    let isCreditPurchase = isBucketPurchase;
+    if (!isCreditPurchase && extRef) {
+      try {
+        const purchaseDoc = await db.collection('credit_purchases').doc(extRef).get();
+        if (purchaseDoc.exists) isCreditPurchase = true;
+      } catch {}
+    }
+    if (isCreditPurchase) {
+      const { handleWebhook: creditsPurchaseWebhook } = require('./credits-purchase');
+      return await creditsPurchaseWebhook(event);
+    }
+
+    // Senão, processa como payment de assinatura (preapproval_id presente)
     const preapprovalId = pay.metadata?.preapproval_id || pay.preapproval_id;
     if (preapprovalId && pay.status === 'approved') {
       const snap = await db.collection('subscriptions')
