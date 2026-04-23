@@ -46,14 +46,18 @@ function json(code, body) {
 }
 
 // Normaliza: {item_name: {buff163: {price, count}, youpin: {price, count}, ...}}
-// → {item_name: {buff: 12.34, youpin: 11.90, ...}, market_hash_name, ...}
+// → {item_name: {buff: 12.34, youpin: 11.90, youpin_count: 42, ...}, market_hash_name, ...}
 // IMPORTANTE: Pricempire v4 paid retorna preço em CENTAVOS. Dividimos por 100.
+// Salvamos também o `count` (listings disponíveis = proxy de volume/popularidade).
 function normalizeV4Item(marketHashName, priceMap) {
   const flat = { market_hash_name: marketHashName };
   const mapKey = { buff163: 'buff', youpin: 'youpin', steam: 'steam', csfloat: 'csfloat', c5game: 'c5game', csmoney: 'csmoney' };
   for (const [src, mapped] of Object.entries(mapKey)) {
     const entry = priceMap[src];
-    if (entry && entry.price != null) flat[mapped] = entry.price / 100;
+    if (entry && entry.price != null) {
+      flat[mapped] = entry.price / 100;
+      if (entry.count != null) flat[mapped + '_count'] = entry.count;
+    }
   }
   return flat;
 }
@@ -61,7 +65,7 @@ function normalizeV4Item(marketHashName, priceMap) {
 // Cache no Firestore — persiste entre restarts do Railway e compartilhado entre instâncias
 const FIRESTORE_CACHE_DOC = { col: 'cached_prices', id: 'pricempire_top_sellers' };
 // Schema version — incrementa quando mudar estrutura de dados pra invalidar cache antigo
-const CACHE_SCHEMA_VERSION = 2; // v2: preços em CNY (divididos por 100, fix de centavos)
+const CACHE_SCHEMA_VERSION = 3; // v3: inclui {src}_count de listings (pra ranking por volume)
 // Como o payload é grande (~25k items), salvamos chunks em subcolection
 async function loadFromFirestoreCache() {
   try {
@@ -342,24 +346,29 @@ function isWeaponOrKnifeOrGloves(name) {
   return false;
 }
 
-// Top sellers: filtrados pra armas/facas/luvas, ordenados por preço × liquidez.
-async function getTopSellers(limit = 50, minPriceCNY = 30, maxPriceCNY = 3000) {
+// Top sellers: ordenado por VOLUME (listings Youpin = mais vendidas).
+// Filtros: só armas/facas/luvas com preço razoável e pelo menos 1 listing Youpin.
+async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
   const items = await fetchPricempireItems();
   const candidates = Object.entries(items)
     .filter(([name]) => isWeaponOrKnifeOrGloves(name))
     .map(([name, it]) => ({
       name,
       youpin: getYoupinPrice(it),
+      youpinCount: parseFloat(it.youpin_count) || 0,
+      buffCount: parseFloat(it.buff_count) || 0,
       platforms: ['buff', 'youpin', 'c5game', 'csfloat', 'dmarket'].filter(p => parseFloat(it[p]) > 0).length,
       item: it,
     }))
-    .filter(x => x.youpin >= minPriceCNY && x.youpin <= maxPriceCNY && x.platforms >= 3)
-    // Rankeia por produto: (preço * liquidez) — skins caras + com múltiplas plataformas
-    .sort((a, b) => (b.youpin * b.platforms) - (a.youpin * a.platforms));
+    .filter(x => x.youpin >= minPriceCNY && x.youpin <= maxPriceCNY && x.youpinCount > 0)
+    // Rankeia por VOLUME real: listings Youpin + BUFF. Skins mais negociadas aparecem primeiro.
+    .sort((a, b) => (b.youpinCount + b.buffCount) - (a.youpinCount + a.buffCount));
 
   return candidates.slice(0, limit).map(x => ({
     name: x.name,
     price_cny: x.youpin,
+    onSale: x.youpinCount,
+    total: x.youpinCount + x.buffCount,
     rarity: x.item.rarity || 'Common',
     type: x.item.type || inferTypeFromName(x.name),
     iconUrl: buildIconUrl(x.item.icon),
