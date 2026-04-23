@@ -346,29 +346,66 @@ function isWeaponOrKnifeOrGloves(name) {
   return false;
 }
 
-// Top sellers: ordenado por VOLUME (listings Youpin = mais vendidas).
-// Filtros: só armas/facas/luvas com preço razoável e pelo menos 1 listing Youpin.
+// Top sellers: ranking por liquidez. Estratégia defensiva — se a Pricempire retornar
+// counts (listings por plataforma), usamos isso. Senão, caímos pra # de plataformas
+// com preço válido como proxy (skin listada em mais mercados = mais líquida).
+//
+// CRÍTICO: pra evitar o "cluster no ceiling" (tudo no preço máximo), filtramos
+// por FAIXAS de preço e pegamos amostras variadas em vez de sortar só pelo preço.
 async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
   const items = await fetchPricempireItems();
-  const candidates = Object.entries(items)
+  const all = Object.entries(items)
     .filter(([name]) => isWeaponOrKnifeOrGloves(name))
-    .map(([name, it]) => ({
-      name,
-      youpin: getYoupinPrice(it),
-      youpinCount: parseFloat(it.youpin_count) || 0,
-      buffCount: parseFloat(it.buff_count) || 0,
-      platforms: ['buff', 'youpin', 'c5game', 'csfloat', 'dmarket'].filter(p => parseFloat(it[p]) > 0).length,
-      item: it,
-    }))
-    .filter(x => x.youpin >= minPriceCNY && x.youpin <= maxPriceCNY && x.youpinCount > 0)
-    // Rankeia por VOLUME real: listings Youpin + BUFF. Skins mais negociadas aparecem primeiro.
-    .sort((a, b) => (b.youpinCount + b.buffCount) - (a.youpinCount + a.buffCount));
+    .map(([name, it]) => {
+      const youpinCount = parseFloat(it.youpin_count) || 0;
+      const buffCount = parseFloat(it.buff_count) || 0;
+      const platforms = ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'steam']
+        .filter(p => parseFloat(it[p]) > 0).length;
+      return {
+        name,
+        youpin: getYoupinPrice(it),
+        youpinCount,
+        buffCount,
+        volume: youpinCount + buffCount,
+        platforms,
+        item: it,
+      };
+    })
+    .filter(x => x.youpin >= minPriceCNY && x.youpin <= maxPriceCNY && x.platforms >= 2);
 
-  return candidates.slice(0, limit).map(x => ({
+  // Verifica se temos dados de volume. Se sim, rankeia por volume.
+  // Se não (API não retorna count), cai pra platforms + faixas de preço pra diversificar.
+  const hasVolumeData = all.some(x => x.volume > 0);
+  console.log(`[Pricempire] top-sellers: ${all.length} candidatos, hasVolumeData=${hasVolumeData}`);
+
+  let ranked;
+  if (hasVolumeData) {
+    ranked = all
+      .filter(x => x.volume > 0)
+      .sort((a, b) => b.volume - a.volume);
+  } else {
+    // Fallback: estratificação por faixa de preço + ranking por platforms.
+    // Divide em 5 faixas logarítmicas e pega top de cada faixa.
+    const buckets = [
+      [3, 50], [50, 200], [200, 800], [800, 3000], [3000, maxPriceCNY]
+    ];
+    ranked = [];
+    for (const [lo, hi] of buckets) {
+      const inRange = all
+        .filter(x => x.youpin >= lo && x.youpin < hi)
+        .sort((a, b) => b.platforms - a.platforms || b.youpin - a.youpin)
+        .slice(0, Math.ceil(limit / buckets.length));
+      ranked.push(...inRange);
+    }
+    // Intercala faixas (alterna barato/caro) pra visual não ficar monotônico
+    ranked.sort(() => Math.random() - 0.5);
+  }
+
+  return ranked.slice(0, limit).map(x => ({
     name: x.name,
     price_cny: x.youpin,
-    onSale: x.youpinCount,
-    total: x.youpinCount + x.buffCount,
+    onSale: x.youpinCount || x.platforms,
+    total: x.volume || x.platforms,
     rarity: x.item.rarity || 'Common',
     type: x.item.type || inferTypeFromName(x.name),
     iconUrl: buildIconUrl(x.item.icon),
