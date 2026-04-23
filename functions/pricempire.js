@@ -346,12 +346,13 @@ function isWeaponOrKnifeOrGloves(name) {
   return false;
 }
 
-// Top sellers: ranking por liquidez. Estratégia defensiva — se a Pricempire retornar
-// counts (listings por plataforma), usamos isso. Senão, caímos pra # de plataformas
-// com preço válido como proxy (skin listada em mais mercados = mais líquida).
+// Top sellers: ranking por liquidez + preços calculados no backend.
 //
-// CRÍTICO: pra evitar o "cluster no ceiling" (tudo no preço máximo), filtramos
-// por FAIXAS de preço e pegamos amostras variadas em vez de sortar só pelo preço.
+// Cada item retorna DOIS preços em BRL:
+//   originalBRL = preço_steam_CNY × fator_conversão          (strikethrough)
+//   saleBRL     = preço_youpin_CNY × fator_conversão × (1 + margem)  (destaque)
+//
+// O fator e a margem vêm de settings/pricing (configurado pelo Gu no admin).
 async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
   const items = await fetchPricempireItems();
   const all = Object.entries(items)
@@ -401,17 +402,30 @@ async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
     ranked.sort(() => Math.random() - 0.5);
   }
 
-  return ranked.slice(0, limit).map(x => ({
-    name: x.name,
-    price_cny: x.youpin,
-    onSale: x.youpinCount || x.platforms,
-    total: x.volume || x.platforms,
-    rarity: x.item.rarity || 'Common',
-    type: x.item.type || inferTypeFromName(x.name),
-    iconUrl: buildIconUrl(x.item.icon),
-    platforms: x.platforms,
-    source: 'pricempire',
-  }));
+  // Aplica pricing config (modo fixed vs rate + margem) em cada item
+  const top = ranked.slice(0, limit);
+  const { getPricingConfig, getConversionFactor, applyPricing } = require('./pricing');
+  const [cfg, factor] = await Promise.all([getPricingConfig(), getConversionFactor()]);
+
+  return top.map(x => {
+    const steamCNY = parseFloat(x.item.steam) || 0;
+    // Se não tem Steam price, extrapola a partir do Youpin (Steam costuma ser +~35% sobre Youpin)
+    const steamEstCNY = steamCNY > 0 ? steamCNY : x.youpin * 1.35;
+    return {
+      name: x.name,
+      price_cny: x.youpin,
+      steam_price_cny: steamEstCNY,
+      originalBRL: applyPricing(steamEstCNY, factor, 0),      // strikethrough
+      saleBRL: applyPricing(x.youpin, factor, cfg.margin),    // preço final de venda
+      onSale: x.youpinCount || x.platforms,
+      total: x.volume || x.platforms,
+      rarity: x.item.rarity || 'Common',
+      type: x.item.type || inferTypeFromName(x.name),
+      iconUrl: buildIconUrl(x.item.icon),
+      platforms: x.platforms,
+      source: 'pricempire',
+    };
+  });
 }
 
 function inferTypeFromName(name) {
