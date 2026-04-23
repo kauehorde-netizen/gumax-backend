@@ -121,7 +121,7 @@ const creditsHandler = require('./functions/credits').handler;
 const analysisHandler = require('./functions/analysis').handler;
 const subscriptionHandler = require('./functions/subscription').handler;
 const creditsPurchaseHandler = require('./functions/credits-purchase').handler;
-const skinportHandler = require('./functions/skinport').handler;
+const pricempireHandler = require('./functions/pricempire').handler;
 const steamMarketHandler = require('./functions/steam-market').handler;
 const priceHistoryHandler = require('./functions/price-history').handler;
 // Módulos opcionais: se o arquivo não foi deployado ainda, desabilita a rota em vez de crashar
@@ -200,11 +200,16 @@ app.post('/api/credits/purchase', rateLimit(60000, 20), wrapHandler(creditsPurch
 app.post('/api/credits/purchase/webhook', wrapHandler(creditsPurchaseHandler)); // sem rate limit — MP
 app.options('/api/credits/purchase', (req, res) => res.sendStatus(204));
 
-// ── Skinport API (fonte principal de preços, grátis) ──
-app.get('/api/skinport/items', rateLimit(60000, 20), wrapHandler(skinportHandler));
-app.get('/api/skinport/suggest', rateLimit(60000, 60), wrapHandler(skinportHandler));
-app.post('/api/skinport/item', rateLimit(60000, 60), wrapHandler(skinportHandler));
-app.options('/api/skinport/*', (req, res) => res.sendStatus(204));
+// ── Pricempire API (fonte canônica de preços, base Youpin) ──
+app.get('/api/pricempire/items', rateLimit(60000, 20), wrapHandler(pricempireHandler));
+app.get('/api/pricempire/suggest', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+app.options('/api/pricempire/*', (req, res) => res.sendStatus(204));
+
+// Aliases legados — redirecionam rotas /api/skinport/* pra pricempire pra não quebrar chamadas antigas
+app.get('/api/skinport/items', rateLimit(60000, 20), wrapHandler(pricempireHandler));
+app.get('/api/skinport/suggest', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+app.post('/api/skinport/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 
 // ── Steam Market (cacheado 24h) ──
 app.post('/api/steam-market/price', rateLimit(60000, 30), wrapHandler(steamMarketHandler));
