@@ -58,13 +58,89 @@ function normalizeV4Item(marketHashName, priceMap) {
   return flat;
 }
 
-// Busca catálogo inteiro via Pricempire v4 paid, com fallback pra v3 se v4 falhar
+// Cache no Firestore — persiste entre restarts do Railway e compartilhado entre instâncias
+const FIRESTORE_CACHE_DOC = { col: 'cached_prices', id: 'pricempire_top_sellers' };
+// Como o payload é grande (~25k items), salvamos chunks em subcolection
+async function loadFromFirestoreCache() {
+  try {
+    const admin = require('firebase-admin');
+    const db = admin.firestore();
+    const mainDoc = await db.collection(FIRESTORE_CACHE_DOC.col).doc(FIRESTORE_CACHE_DOC.id).get();
+    if (!mainDoc.exists) return null;
+    const meta = mainDoc.data();
+    if (!meta || !meta.ts || !meta.chunks) return null;
+    // Cache válido por até 25h (safe margin em cima do cron 24h)
+    if (Date.now() - meta.ts > 25 * 60 * 60 * 1000) return null;
+
+    const chunks = await db.collection(FIRESTORE_CACHE_DOC.col)
+      .doc(FIRESTORE_CACHE_DOC.id).collection('chunks').get();
+    const byName = Object.create(null);
+    chunks.forEach(doc => {
+      const items = doc.data()?.items || {};
+      for (const [name, data] of Object.entries(items)) {
+        byName[name] = { market_hash_name: name, ...data };
+      }
+    });
+    if (Object.keys(byName).length > 0) {
+      console.log(`[Pricempire] Loaded ${Object.keys(byName).length} items from Firestore cache (age: ${Math.round((Date.now() - meta.ts)/60000)}min)`);
+      return { data: byName, ts: meta.ts, version: meta.version || 'firestore' };
+    }
+    return null;
+  } catch (e) {
+    console.log('[Pricempire] Firestore cache read error:', e.message);
+    return null;
+  }
+}
+
+async function saveToFirestoreCache(byName, version) {
+  try {
+    const admin = require('firebase-admin');
+    const db = admin.firestore();
+    const names = Object.keys(byName);
+    // Firestore doc limit 1MB; chunks de 2000 items ~ bem dentro
+    const CHUNK_SIZE = 2000;
+    const chunkCount = Math.ceil(names.length / CHUNK_SIZE);
+    for (let i = 0; i < names.length; i += CHUNK_SIZE) {
+      const chunk = names.slice(i, i + CHUNK_SIZE);
+      const chunkIdx = Math.floor(i / CHUNK_SIZE);
+      const payload = {};
+      for (const n of chunk) payload[n] = byName[n];
+      await db.collection(FIRESTORE_CACHE_DOC.col)
+        .doc(FIRESTORE_CACHE_DOC.id).collection('chunks').doc(String(chunkIdx))
+        .set({ items: payload }, { merge: false });
+    }
+    await db.collection(FIRESTORE_CACHE_DOC.col).doc(FIRESTORE_CACHE_DOC.id).set({
+      ts: Date.now(),
+      version: version || 'v4paid',
+      chunks: chunkCount,
+      count: names.length,
+      updatedAt: new Date().toISOString(),
+    }, { merge: true });
+    console.log(`[Pricempire] Saved ${names.length} items to Firestore cache (${chunkCount} chunks)`);
+  } catch (e) {
+    console.log('[Pricempire] Firestore cache write error:', e.message);
+  }
+}
+
+// Busca catálogo inteiro via Pricempire v4 paid, com fallback pra v3 se v4 falhar.
+// Estratégia de cache (em ordem):
+//   1) Memory cache (fast, zera a cada restart)
+//   2) Firestore cache (persistente, shared entre instâncias, age < 25h)
+//   3) Chamada fresh na Pricempire (5-10s)
 async function fetchPricempireItems() {
+  // 1) Memory
   if (global._pricempireCache
       && global._pricempireCache.ts
       && Date.now() - global._pricempireCache.ts < CACHE_TTL) {
     return global._pricempireCache.data;
   }
+  // 2) Firestore
+  const fsCache = await loadFromFirestoreCache();
+  if (fsCache) {
+    global._pricempireCache = fsCache;
+    return fsCache.data;
+  }
+  // 3) Fresh
   const apiKey = process.env.PRICEMPIRE_API_KEY;
   if (!apiKey) {
     console.warn('[Pricempire] PRICEMPIRE_API_KEY not configured');
@@ -102,6 +178,8 @@ async function fetchPricempireItems() {
       if (Object.keys(byName).length > 0) {
         global._pricempireCache = { data: byName, ts: Date.now(), version: 'v4paid' };
         console.log(`[Pricempire] v4 OK — ${Object.keys(byName).length} items`);
+        // Salva no Firestore pra próximas instâncias/restarts
+        saveToFirestoreCache(byName, 'v4paid').catch(() => {});
         return byName;
       }
       console.warn('[Pricempire] v4 returned empty payload');
@@ -128,6 +206,7 @@ async function fetchPricempireItems() {
       if (Object.keys(byName).length > 0) {
         global._pricempireCache = { data: byName, ts: Date.now(), version: 'v3' };
         console.log(`[Pricempire] v3 OK — ${Object.keys(byName).length} items`);
+        saveToFirestoreCache(byName, 'v3').catch(() => {});
         return byName;
       }
     }
@@ -226,11 +305,39 @@ async function suggestSkins(query, limit = 10) {
   return matches.slice(0, limit).map(m => m.name);
 }
 
-// Top sellers: sort por preço Youpin entre um range razoável, filtrando skins com
-// preços em múltiplas plataformas (= liquidez real). Evita itens super baratos e super caros.
-async function getTopSellers(limit = 50, minPriceCNY = 30, maxPriceCNY = 2000) {
+// Lista de armas do CS2. Usada pra filtrar o top-sellers — queremos mostrar só
+// armas, facas e luvas na home (mercado BR não investe em sticker/patch/music kit).
+const WEAPON_PREFIXES = [
+  // Rifles
+  'AK-47', 'M4A4', 'M4A1-S', 'AUG', 'SG 553', 'Galil AR', 'FAMAS',
+  // SMGs
+  'MP9', 'MAC-10', 'MP7', 'MP5-SD', 'UMP-45', 'P90', 'PP-Bizon',
+  // Heavy
+  'Nova', 'XM1014', 'Sawed-Off', 'MAG-7', 'M249', 'Negev',
+  // Snipers
+  'AWP', 'SSG 08', 'G3SG1', 'SCAR-20',
+  // Pistols
+  'Glock-18', 'USP-S', 'P2000', 'P250', 'Five-SeveN', 'Tec-9',
+  'CZ75-Auto', 'Desert Eagle', 'Dual Berettas', 'R8 Revolver', 'Zeus x27',
+];
+
+// Retorna true se o nome é de uma arma, faca ou luva (★ prefix)
+function isWeaponOrKnifeOrGloves(name) {
+  if (!name) return false;
+  // Facas e luvas: começam com ★
+  if (name.startsWith('★')) return true;
+  // Armas: começam com o nome da arma seguido de espaço + |
+  for (const prefix of WEAPON_PREFIXES) {
+    if (name.startsWith(prefix + ' |')) return true;
+  }
+  return false;
+}
+
+// Top sellers: filtrados pra armas/facas/luvas, ordenados por preço × liquidez.
+async function getTopSellers(limit = 50, minPriceCNY = 30, maxPriceCNY = 3000) {
   const items = await fetchPricempireItems();
   const candidates = Object.entries(items)
+    .filter(([name]) => isWeaponOrKnifeOrGloves(name))
     .map(([name, it]) => ({
       name,
       youpin: getYoupinPrice(it),
@@ -245,11 +352,18 @@ async function getTopSellers(limit = 50, minPriceCNY = 30, maxPriceCNY = 2000) {
     name: x.name,
     price_cny: x.youpin,
     rarity: x.item.rarity || 'Common',
-    type: x.item.type || 'Weapon Skin',
+    type: x.item.type || inferTypeFromName(x.name),
     iconUrl: buildIconUrl(x.item.icon),
     platforms: x.platforms,
     source: 'pricempire',
   }));
+}
+
+function inferTypeFromName(name) {
+  if (name.startsWith('★')) {
+    return /Gloves|Hand Wraps/i.test(name) ? 'Luva' : 'Faca';
+  }
+  return 'Arma';
 }
 
 // ── Handler HTTP ──────────────────────────────────────────────────────────
