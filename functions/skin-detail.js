@@ -1,53 +1,56 @@
 // ═══ Gumax — Skin Detail Endpoint ═══
-// Returns single skin detail with all platform prices and available data
+// Retorna detalhes de uma skin específica com preços.
+// Stack:
+//   • Skinport (primary, USD) — gratuito, bulk cacheado
+//   • Steam Market (secondary, BRL) — gratuito, cache 24h
+//   • Pricempire (opcional, CNY) — só se PRICEMPIRE_API_KEY estiver setado
 
-const https = require('https');
-
-function parsePrice(obj, source = 'buff') {
-  if (!obj) return 0;
-  if (typeof obj === 'number') return obj;
-  if (typeof obj === 'object' && source in obj) return parseFloat(obj[source]) || 0;
-  return 0;
-}
+const { getSkinportItem } = require('./skinport');
+const { getSteamPrice } = require('./steam-market');
 
 function rd(val) {
-  return Math.round(val * 100) / 100;
+  return val == null || !Number.isFinite(val) ? null : Math.round(val * 100) / 100;
 }
 
-async function fetchPricempireDetail(skinName, apiKey) {
+async function fetchUsdBrl() {
+  if (global._usdBrlCache && global._usdBrlCache.ts && Date.now() - global._usdBrlCache.ts < 60 * 60 * 1000) {
+    return global._usdBrlCache.value;
+  }
+  try {
+    const r = await fetch('https://api.exchangerate-api.com/v4/latest/USD', { timeout: 5000 });
+    const d = await r.json();
+    const rate = d.rates?.BRL || 5.1;
+    global._usdBrlCache = { value: rate, ts: Date.now() };
+    return rate;
+  } catch { return global._usdBrlCache?.value || 5.1; }
+}
+
+async function fetchCnyBrl() {
+  if (global._cnyBrlCache && global._cnyBrlCache.ts && Date.now() - global._cnyBrlCache.ts < 60 * 60 * 1000) {
+    return global._cnyBrlCache.value;
+  }
+  try {
+    const r = await fetch('https://api.exchangerate-api.com/v4/latest/CNY', { timeout: 5000 });
+    const d = await r.json();
+    const rate = d.rates?.BRL || 0.68;
+    global._cnyBrlCache = { value: rate, ts: Date.now() };
+    return rate;
+  } catch { return global._cnyBrlCache?.value || 0.68; }
+}
+
+async function fetchPricempireDetail(skinName) {
+  const apiKey = process.env.PRICEMPIRE_API_KEY;
+  if (!apiKey) return null;
   try {
     const response = await fetch(`https://api.pricempire.com/v4/cs2/item/${encodeURIComponent(skinName)}`, {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'User-Agent': 'Gumax-Backend/1.0'
-      },
-      timeout: 10000
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'User-Agent': 'Gumax-Backend/1.0' },
+      timeout: 10000,
     });
-
     if (!response.ok) return null;
     return await response.json();
   } catch (e) {
     console.log('[SkinDetail] Pricempire error:', e.message);
     return null;
-  }
-}
-
-async function fetchExchangeRate() {
-  if (global._rateCache && global._rateCache.ts && Date.now() - global._rateCache.ts < 60 * 60 * 1000) {
-    return global._rateCache.value;
-  }
-
-  try {
-    const response = await fetch('https://api.exchangerate-api.com/v4/latest/CNY', {
-      timeout: 5000
-    });
-    const data = await response.json();
-    const rate = data.rates?.BRL || 0.68;
-
-    global._rateCache = { value: rate, ts: Date.now() };
-    return rate;
-  } catch (e) {
-    return global._rateCache?.value || 0.68;
   }
 }
 
@@ -57,9 +60,7 @@ async function getFirestoreConfig() {
     const db = admin.firestore();
     const doc = await db.collection('config').doc('store').get();
     return doc.data() || {};
-  } catch (e) {
-    return {};
-  }
+  } catch { return {}; }
 }
 
 exports.handler = async (event) => {
@@ -69,119 +70,109 @@ exports.handler = async (event) => {
     'Access-Control-Allow-Headers': 'Content-Type',
   };
 
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: H, body: '' };
-  }
-
-  if (event.httpMethod !== 'POST') {
-    return { statusCode: 405, headers: H, body: JSON.stringify({ error: 'POST only' }) };
-  }
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: H, body: '' };
+  if (event.httpMethod !== 'POST') return { statusCode: 405, headers: H, body: JSON.stringify({ error: 'POST only' }) };
 
   try {
     const body = JSON.parse(event.body || '{}');
     const { name } = body;
-
     if (!name || !name.trim()) {
       return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'Skin name required' }) };
     }
 
-    const PRICEMPIRE_KEY = process.env.PRICEMPIRE_API_KEY;
-    if (!PRICEMPIRE_KEY) {
-      return { statusCode: 500, headers: H, body: JSON.stringify({ error: 'API not configured' }) };
-    }
-
-    // Fetch data in parallel
-    const [priceData, rate, config] = await Promise.all([
-      fetchPricempireDetail(name, PRICEMPIRE_KEY),
-      fetchExchangeRate(),
-      getFirestoreConfig()
+    // Fetch paralelo (todos optional)
+    const [skinportItem, steam, pricempire, usdRate, cnyRate, config] = await Promise.all([
+      getSkinportItem(name),
+      getSteamPrice(name),
+      fetchPricempireDetail(name),
+      fetchUsdBrl(),
+      fetchCnyBrl(),
+      getFirestoreConfig(),
     ]);
 
-    if (!priceData) {
-      return { statusCode: 404, headers: H, body: JSON.stringify({ error: 'Skin not found' }) };
+    // Pelo menos uma fonte tem que ter retornado preço
+    const hasSkinport = skinportItem && skinportItem.min_price != null;
+    const hasSteam = steam && steam.lowest_price_brl != null;
+    const hasPricempire = pricempire != null;
+
+    if (!hasSkinport && !hasSteam && !hasPricempire) {
+      return { statusCode: 404, headers: H, body: JSON.stringify({ error: 'Skin not found in any source', name }) };
     }
 
-    const margin = config.margin || 15;
+    const margin = config.margin ?? 15;
     const categoryMargins = config.categoryMargins || {};
 
-    // Extract prices from all platforms (in CNY)
-    const pricesCNY = {
-      buff: parsePrice(priceData, 'buff') || 0,
-      youpin: parsePrice(priceData, 'youpin') || 0,
-      c5game: parsePrice(priceData, 'c5game') || 0,
-      steam: parsePrice(priceData, 'steam') || 0,
-      csfloat: parsePrice(priceData, 'csfloat') || 0,
-      csmoney: parsePrice(priceData, 'csmoney') || 0
-    };
-
-    // Use the lowest available price as the "best" price
-    const bestCNY = Math.min(...Object.values(pricesCNY).filter(p => p > 0)) || 0;
-
-    // Apply margin
-    const categoryMargin = categoryMargins[priceData.type || 'Weapon Skin'] || margin;
-    const marginedPrice = bestCNY * (1 + (categoryMargin / 100));
-
-    // Convert to BRL
+    // Preços em BRL por plataforma
     const pricesBRL = {};
-    for (const [source, cnyPrice] of Object.entries(pricesCNY)) {
-      pricesBRL[source] = cnyPrice > 0 ? rd(cnyPrice * rate) : 0;
+    if (hasSkinport) pricesBRL.skinport = rd(skinportItem.min_price * usdRate);
+    if (hasSteam) pricesBRL.steam = rd(steam.lowest_price_brl);
+    if (hasPricempire) {
+      const plats = ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'dmarket', 'waxpeer'];
+      for (const p of plats) {
+        const v = parseFloat(pricempire[p]) || 0;
+        if (v > 0) pricesBRL[p] = rd(v * cnyRate);
+      }
     }
 
-    const bestBRL = rd(marginedPrice * rate);
+    const validPrices = Object.entries(pricesBRL).filter(([, v]) => v != null && v > 0);
+    if (!validPrices.length) {
+      return { statusCode: 404, headers: H, body: JSON.stringify({ error: 'No valid prices', name }) };
+    }
 
-    // Build response
+    const lowest = validPrices.reduce((min, cur) => cur[1] < min[1] ? cur : min, validPrices[0]);
+    const lowestSrc = lowest[0];
+    const bestBRL = lowest[1];
+    const categoryMargin = categoryMargins[pricempire?.type || 'Weapon Skin'] ?? margin;
+    const finalBRL = rd(bestBRL * (1 + categoryMargin / 100));
+
     const detail = {
       success: true,
-      name: name,
-      type: priceData.type || 'Weapon Skin',
-      rarity: priceData.rarity || 'Common',
-      collection: priceData.collection || '',
-      description: priceData.description || '',
+      name,
+      type: pricempire?.type || 'Weapon Skin',
+      rarity: pricempire?.rarity || skinportItem?.rarity || 'Common',
+      collection: pricempire?.collection || '',
+      description: pricempire?.description || '',
 
-      // Pricing
       prices: {
         lowest: {
-          source: Object.entries(pricesCNY).filter(([, p]) => p === bestCNY)[0]?.[0] || 'buff',
-          cny: rd(bestCNY),
-          brl: rd(bestCNY * rate),
-          withMargin: bestBRL
+          source: lowestSrc,
+          brl: bestBRL,
+          withMargin: finalBRL,
         },
-        allPlatforms: {
-          cny: pricesCNY,
-          brl: pricesBRL
-        }
+        allPlatforms: { brl: pricesBRL },
       },
 
-      // Margin info
       margin: {
         percentage: categoryMargin,
-        basePrice: rd(bestCNY * rate),
-        finalPrice: bestBRL,
-        profitMargin: rd(bestBRL - bestCNY * rate)
+        basePrice: bestBRL,
+        finalPrice: finalBRL,
+        profitMargin: rd(finalBRL - bestBRL),
       },
 
-      // Availability
-      inStock: false, // Check Firestore separately if needed
-      exchangeRate: rd(rate),
+      inStock: false,
+      exchangeRate: { usdBrl: rd(usdRate, 3), cnyBrl: rd(cnyRate, 3) },
 
-      // Additional details
-      icon: priceData.icon || '',
-      wear: priceData.wear || '',
-      float: priceData.float || null,
-      paintSeed: priceData.paintSeed || null,
-      stickers: priceData.stickers || [],
+      icon: pricempire?.icon || '',
+      wear: pricempire?.wear || '',
+      float: pricempire?.float || null,
+      paintSeed: pricempire?.paintSeed || null,
+      stickers: pricempire?.stickers || [],
 
-      // Meta
-      lastUpdated: priceData.lastUpdated || new Date().toISOString(),
-      source: 'pricempire'
+      sources: {
+        skinport: hasSkinport,
+        steam: hasSteam,
+        pricempire: hasPricempire,
+      },
+      volume: {
+        steam: steam?.volume || 0,
+        skinport: skinportItem?.quantity || 0,
+      },
+
+      lastUpdated: new Date().toISOString(),
+      source: lowestSrc,
     };
 
-    return {
-      statusCode: 200,
-      headers: H,
-      body: JSON.stringify(detail)
-    };
-
+    return { statusCode: 200, headers: H, body: JSON.stringify(detail) };
   } catch (e) {
     console.error('[SkinDetail] Error:', e.message);
     return { statusCode: 500, headers: H, body: JSON.stringify({ error: e.message }) };
