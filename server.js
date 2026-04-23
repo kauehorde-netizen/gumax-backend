@@ -124,7 +124,13 @@ const creditsPurchaseHandler = require('./functions/credits-purchase').handler;
 const skinportHandler = require('./functions/skinport').handler;
 const steamMarketHandler = require('./functions/steam-market').handler;
 const priceHistoryHandler = require('./functions/price-history').handler;
-const steamInventoryHandler = require('./functions/steam-inventory').handler;
+// Módulos opcionais: se o arquivo não foi deployado ainda, desabilita a rota em vez de crashar
+let steamInventoryHandler = null;
+try {
+  steamInventoryHandler = require('./functions/steam-inventory').handler;
+} catch (e) {
+  console.warn('[server] steam-inventory not available — route will be disabled:', e.message);
+}
 const { processShieldRefunds } = require('./functions/analysis');
 const { distributeMonthlyCredits } = require('./functions/subscription');
 const { snapshotDailyPrices } = require('./functions/price-history');
@@ -220,8 +226,12 @@ app.post('/api/shield/process', rateLimit(60000, 5), async (req, res) => {
 });
 
 // Admin: sync de inventário Steam (pesado — 3 por minuto)
-app.post('/api/admin/sync-inventory', rateLimit(60000, 3), wrapHandler(steamInventoryHandler));
-app.options('/api/admin/sync-inventory', (req, res) => res.sendStatus(204));
+if (steamInventoryHandler) {
+  app.post('/api/admin/sync-inventory', rateLimit(60000, 3), wrapHandler(steamInventoryHandler));
+  app.options('/api/admin/sync-inventory', (req, res) => res.sendStatus(204));
+} else {
+  app.post('/api/admin/sync-inventory', (req, res) => res.status(503).json({ error: 'steam-inventory module not deployed' }));
+}
 
 // Admin endpoints: 20 per minute (requires API key)
 app.post('/api/admin/update-margins', rateLimit(60000, 20), wrapHandler(adminHandler));
