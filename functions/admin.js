@@ -310,42 +310,42 @@ exports.handler = async (event) => {
     }
 
     // ═══ GET PRICING CONFIG ═══
-    // Retorna { mode, fixedRate, margin } + cotação atual do Google pra preview.
+    // Retorna { mode, fixedRate, surcharge } + cotação atual pra preview.
     if (action === 'get-pricing') {
-      const { getPricingConfig, getConversionFactor } = require('./pricing');
+      const { getPricingConfig } = require('./pricing');
       const { fetchExchangeRate, getRateCache } = require('./exchange-rate');
       const [cfg, googleRate] = await Promise.all([
-        getPricingConfig(true),      // force refresh
+        getPricingConfig(true),
         fetchExchangeRate().catch(() => 0),
       ]);
       const cache = getRateCache();
-      const factor = cfg.mode === 'rate' ? googleRate : cfg.fixedRate;
+      const baseFactor = cfg.mode === 'rate' ? googleRate : cfg.fixedRate;
+      const saleFactor = cfg.mode === 'rate' ? baseFactor + (cfg.surcharge || 0) : cfg.fixedRate;
       return {
         statusCode: 200,
         headers: H,
         body: JSON.stringify({
           success: true,
           config: cfg,
-          currentFactor: factor,
+          currentFactor: saleFactor,
           googleRate,
           rateSource: cache.source,
           preview: {
-            // Exemplo: skin a 100 CNY no Youpin
             youpinCNY: 100,
-            originalBRL: Math.round(100 * factor * 100) / 100,
-            saleBRL: Math.round(100 * factor * (1 + cfg.margin) * 100) / 100,
+            originalBRL: Math.round(100 * baseFactor * 100) / 100,
+            saleBRL: Math.round(100 * saleFactor * 100) / 100,
           },
         }),
       };
     }
 
     // ═══ UPDATE PRICING CONFIG ═══
-    // body: { mode?, fixedRate?, margin? }
+    // body: { mode?, fixedRate?, surcharge? }
     if (action === 'update-pricing') {
       const { setPricingConfig } = require('./pricing');
-      const { mode, fixedRate, margin } = body;
+      const { mode, fixedRate, surcharge } = body;
       try {
-        const cfg = await setPricingConfig({ mode, fixedRate, margin }, 'admin');
+        const cfg = await setPricingConfig({ mode, fixedRate, surcharge }, 'admin');
         console.log('[Admin] Updated pricing:', cfg);
         return {
           statusCode: 200,
