@@ -10,8 +10,10 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-// Top-sellers: página o GetCsGoPagedList SEM keyWords, ordenando por vendas.
-// Cacheado em memória por 1h pra reduzir carga.
+// Top-sellers: usa Pricempire (fonte canônica que o Gumax paga) filtrando pelo
+// preço Youpin — que é a base de custos reais das skins chinesas que o Gu revende.
+// Retorna items com imagem da Steam CDN (via hash do icon).
+// Cache 1h em memória.
 const TOP_CACHE_TTL = 60 * 60 * 1000;
 async function fetchYoupinTopSellers(limit = 50) {
   if (global._youpinTopCache && Date.now() - global._youpinTopCache.ts < TOP_CACHE_TTL
@@ -19,34 +21,48 @@ async function fetchYoupinTopSellers(limit = 50) {
     return global._youpinTopCache.data.slice(0, limit);
   }
 
+  try {
+    const { getTopSellers } = require('./pricempire');
+    const top = await getTopSellers(limit);
+    // Compat payload: o frontend já espera price_cny, name, iconUrl, onSale
+    const all = top.map(it => ({
+      name: it.name,
+      price_cny: it.price_cny,
+      onSale: it.platforms,        // usamos nº de plataformas como proxy de liquidez
+      total: it.platforms,
+      iconUrl: it.iconUrl,
+      tradeable: true,
+      rarity: it.rarity,
+      type: it.type,
+      source: 'pricempire',
+    }));
+    global._youpinTopCache = { data: all, ts: Date.now(), limit };
+    return all;
+  } catch (e) {
+    console.error('[Top sellers] pricempire error:', e.message);
+    return [];
+  }
+}
+
+// Mantido pra compatibilidade — caso a gente queira futuramente voltar a usar Youpin
+async function fetchYoupinTopSellersDirect(limit = 50) {
   const pageSize = 40;
   const pages = Math.ceil(limit / pageSize);
   const all = [];
-
   for (let page = 1; page <= pages; page++) {
     try {
       const postData = JSON.stringify({
-        listType: '30',
-        gameId: '730',
-        keyWords: '',
-        pageIndex: page,
-        pageSize,
-        sortType: '1',    // 1 = order by popularity/volume
-        listSortType: '2',
+        listType: '30', gameId: '730', keyWords: '', pageIndex: page, pageSize, sortType: '1', listSortType: '2',
       });
-
       const result = await new Promise((resolve) => {
         const options = {
-          hostname: 'api.youpin898.com',
-          port: 443,
-          path: '/api/homepage/es/template/GetCsGoPagedList',
+          hostname: 'api.youpin898.com', port: 443, path: '/api/homepage/es/template/GetCsGoPagedList',
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(postData),
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-            'Referer': 'https://www.youpin898.com/',
-            'Accept': 'application/json',
+            'Referer': 'https://www.youpin898.com/', 'Accept': 'application/json',
             'Origin': 'https://www.youpin898.com',
           },
           timeout: 10000,
@@ -55,36 +71,23 @@ async function fetchYoupinTopSellers(limit = 50) {
           let body = '';
           res.on('data', c => body += c);
           res.on('end', () => {
-            try {
-              const data = JSON.parse(body);
-              resolve(data?.Data || []);
-            } catch { resolve([]); }
+            try { resolve(JSON.parse(body)?.Data || []); } catch { resolve([]); }
           });
         });
         req.on('error', () => resolve([]));
         req.on('timeout', () => { req.destroy(); resolve([]); });
-        req.write(postData);
-        req.end();
+        req.write(postData); req.end();
       });
-
       for (const i of result) {
         all.push({
-          name: i.CommodityName || '',
-          price_cny: parseFloat(i.SellMinPrice) || parseFloat(i.Price) || 0,
-          onSale: i.OnSaleCount || 0,
-          total: i.TotalCount || 0,
-          iconUrl: i.IconUrl || '',
+          name: i.CommodityName || '', price_cny: parseFloat(i.SellMinPrice) || parseFloat(i.Price) || 0,
+          onSale: i.OnSaleCount || 0, total: i.TotalCount || 0, iconUrl: i.IconUrl || '',
           tradeable: i.Tradable !== false,
         });
       }
-      if (result.length < pageSize) break; // fim
-    } catch (e) {
-      console.log('[Youpin top] page', page, e.message);
-      break;
-    }
+      if (result.length < pageSize) break;
+    } catch { break; }
   }
-
-  global._youpinTopCache = { data: all, ts: Date.now(), limit };
   return all.slice(0, limit);
 }
 
