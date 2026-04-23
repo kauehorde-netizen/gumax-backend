@@ -20,7 +20,7 @@
 
 const admin = require('firebase-admin');
 const { consume } = require('./credits');
-const { getSkinportItem } = require('./skinport');
+const { getPricempireItem, getYoupinPrice, buildIconUrl } = require('./pricempire');
 const { getSteamPrice } = require('./steam-market');
 const { getHistoryForSkin, classifyInternalTrend } = require('./price-history');
 
@@ -65,19 +65,6 @@ async function verifyIdToken(headers) {
 }
 
 // ── Exchange rate USD→BRL + CNY→BRL ───────────────────────────────────────
-async function fetchUsdBrl() {
-  if (global._usdRateCache && Date.now() - global._usdRateCache.ts < 60 * 60 * 1000) {
-    return global._usdRateCache.value;
-  }
-  try {
-    const resp = await fetch('https://api.exchangerate-api.com/v4/latest/USD', { timeout: 5000 });
-    const data = await resp.json();
-    const rate = data.rates?.BRL || 5.1;
-    global._usdRateCache = { value: rate, ts: Date.now() };
-    return rate;
-  } catch { return global._usdRateCache?.value || 5.1; }
-}
-
 async function fetchCnyBrl() {
   if (global._cnyRateCache && Date.now() - global._cnyRateCache.ts < 60 * 60 * 1000) {
     return global._cnyRateCache.value;
@@ -274,13 +261,14 @@ async function processShieldRefunds() {
   for (const doc of snap.docs) {
     const t = doc.data();
     try {
-      const usdRate = await fetchUsdBrl();
-      const item = await getSkinportItem(t.skin);
-      if (!item || item.min_price == null) {
-        await doc.ref.update({ checked: true, error: 'not_found_skinport' });
+      const cnyRate = await fetchCnyBrl();
+      const item = await getPricempireItem(t.skin);
+      const youpin = item ? getYoupinPrice(item) : 0;
+      if (!item || !youpin) {
+        await doc.ref.update({ checked: true, error: 'not_found_pricempire' });
         continue;
       }
-      const currentLowestBRL = item.min_price * usdRate;
+      const currentLowestBRL = youpin * cnyRate;
       const dropPct = ((t.priceAtAnalysisBRL - currentLowestBRL) / t.priceAtAnalysisBRL) * 100;
 
       if (dropPct > 0 && dropPct <= SHIELD_MAX_DROP_PCT) {
@@ -379,24 +367,21 @@ exports.handler = async (event) => {
     return json(200, { ...cached, fromCache: true });
   }
 
-  // ── Fetch de dados base (grátis, sempre) ────────────────────────────────
-  const [skinportItem, usdRate] = await Promise.all([
-    getSkinportItem(name),
-    fetchUsdBrl(),
+  // ── Fetch de dados base: Pricempire (fonte canônica) ────────────────────
+  const [pricempireItem, cnyRate] = await Promise.all([
+    getPricempireItem(name),
+    fetchCnyBrl(),
   ]);
 
-  if (!skinportItem) {
-    return json(404, { error: 'Skin not found on Skinport', name });
+  if (!pricempireItem) {
+    return json(404, { error: 'Skin not found on Pricempire', name });
   }
 
-  const skinportBRL = skinportItem.min_price != null ? skinportItem.min_price * usdRate : null;
-
-  // Steam Market — cacheado 24h. Gratuito mas pode rate-limit.
+  // Steam Market — cacheado 24h. Complementar à Pricempire.
   const steam = await getSteamPrice(name);
   const steamBRL = steam?.lowest_price_brl || null;
 
   // ── Cobrar créditos AGORA (se tier pago) ──────────────────────────────
-  // Se cache unhealthy existia, já cobramos antes — não cobra de novo (refaz de graça)
   const cost = COSTS[tier];
   if (cost > 0 && !cacheExistsButUnhealthy) {
     const result = await consume(uid, cost, `analysis:${tier}:${name}`, { skin: name, tier });
@@ -406,62 +391,20 @@ exports.handler = async (event) => {
   }
 
   // ── Montar breakdown de preços em BRL ─────────────────────────────────
-  // Cada entry marca se é real (source='api') ou estimado (source='estimate')
+  // Todos os preços vêm da Pricempire (real). Steam vem complementar.
   const pricesBRL = {};
-  const priceSources = {}; // { platform: 'api'|'estimate' }
+  const priceSources = {};
 
-  if (skinportBRL != null) { pricesBRL.skinport = skinportBRL; priceSources.skinport = 'api'; }
+  const plats = ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'dmarket', 'waxpeer'];
+  for (const p of plats) {
+    const v = parseFloat(pricempireItem[p]) || 0;
+    if (v > 0) { pricesBRL[p] = v * cnyRate; priceSources[p] = 'api'; }
+  }
   if (steamBRL != null) { pricesBRL.steam = steamBRL; priceSources.steam = 'api'; }
 
-  // Pricempire (opcional, só no tier full) — preços reais de BUFF/Youpin/C5/DMarket/etc
-  let pricempire = null;
-  if (tier === 'full') {
-    pricempire = await fetchPricempireDetail(name);
-    if (pricempire) {
-      const cnyRate = await fetchCnyBrl();
-      const plats = ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'dmarket', 'waxpeer'];
-      for (const p of plats) {
-        const v = parseFloat(pricempire[p]) || 0;
-        if (v > 0) { pricesBRL[p] = v * cnyRate; priceSources[p] = 'api'; }
-      }
-    }
-  }
-
-  // Estimativas no tier full: se Pricempire não está disponível, estimamos preços
-  // baseados em deltas históricos conhecidos do mercado. O usuário vê uma comparação
-  // aproximada das principais plataformas. NÃO é preço de venda real — é estimativa.
-  // Deltas calibrados em abril/2026 (snapshot em 1000+ skins líquidas):
-  //   BUFF163:  -9%   vs Skinport  (mais barato)
-  //   Youpin:   -11%  vs Skinport
-  //   C5Game:   -7%   vs Skinport
-  //   CSFloat:  +4%   vs Skinport  (mais caro)
-  //   DMarket:  +8%   vs Skinport
-  const ESTIMATE_DELTAS = {
-    buff:    0.91,
-    youpin:  0.89,
-    c5game:  0.93,
-    csfloat: 1.04,
-    dmarket: 1.08,
-  };
-  if (tier === 'full' && skinportBRL != null) {
-    for (const [plat, factor] of Object.entries(ESTIMATE_DELTAS)) {
-      if (pricesBRL[plat] == null) {
-        pricesBRL[plat] = skinportBRL * factor;
-        priceSources[plat] = 'estimate';
-      }
-    }
-  }
-
-  // suggestedBRL da Skinport: usado quando só temos 1 fonte de preço
-  const suggestedBRL = skinportItem.suggested_price != null
-    ? skinportItem.suggested_price * usdRate
-    : null;
-  // Score é calculado APENAS com preços reais (não com estimativas), pra não falsear
-  const realPricesBRL = {};
-  for (const [k, v] of Object.entries(pricesBRL)) {
-    if (priceSources[k] === 'api') realPricesBRL[k] = v;
-  }
-  const scoreData = computeScore(realPricesBRL, suggestedBRL);
+  // Youpin é a base canônica (em CNY) — usada como "suggested" pra score single-source
+  const youpinBRL = pricesBRL.youpin || null;
+  const scoreData = computeScore(pricesBRL, youpinBRL);
 
   // ── Tendência: próprio (Firestore snapshots) ou Pricempire ─────────────
   let trend = null;
@@ -482,14 +425,13 @@ exports.handler = async (event) => {
     name,
     tier,
     creditsSpent: cost,
-    rarity: pricempire?.rarity || skinportItem.rarity || 'Common',
-    type: pricempire?.type || 'Weapon Skin',
-    icon: pricempire?.icon || null,
-    exchangeRate: { usdBrl: rd(usdRate, 3) },
+    rarity: pricempireItem.rarity || 'Common',
+    type: pricempireItem.type || 'Weapon Skin',
+    icon: buildIconUrl(pricempireItem.icon),
+    exchangeRate: { cnyBrl: rd(cnyRate, 3) },
     sources: {
-      skinport: skinportBRL != null,
+      pricempire: true,
       steam: steamBRL != null,
-      pricempire: !!pricempire,
       ownHistory: trend?.source === 'internal_skinport',
     },
     score: scoreData ? {
@@ -517,14 +459,12 @@ exports.handler = async (event) => {
       sources: priceSources,
       cheapestPlatform: cheapestAll,
       cheapestPlatformReal: scoreData?.cheapestPlatform || null,
-      volume: { steam: steam?.volume || 0, skinport: skinportItem.quantity || 0 },
+      volume: { steam: steam?.volume || 0 },
     };
 
-    if (pricempire) {
-      response.stickers = pricempire.stickers || [];
-      response.paintSeed = pricempire.paintSeed || null;
-      response.float = pricempire.float || null;
-    }
+    response.stickers = pricempireItem.stickers || [];
+    response.paintSeed = pricempireItem.paintSeed || null;
+    response.float = pricempireItem.float || null;
 
     const autoRec = autoRecommendation(scoreData, trend);
     const adminOpp = await getAdminOpportunity(name);
@@ -556,9 +496,9 @@ exports.handler = async (event) => {
   if (tier === 'history') {
     const points = await getHistoryForSkin(name, 30);
     response.history = {
-      source: points.length ? 'internal_skinport' : (trend ? 'pricempire' : 'none'),
+      source: points.length ? 'internal_pricempire' : (trend ? 'pricempire' : 'none'),
       days: 30,
-      points: points.map(p => ({ date: p.date, price_brl: rd(p.price_usd * usdRate) })),
+      points: points.map(p => ({ date: p.date, price_brl: rd(p.price_cny * cnyRate) })),
     };
   }
 
