@@ -1,25 +1,16 @@
 // ═══ Gumax — Price History (internal) ═══
-// Construímos nosso próprio histórico de preços fazendo um snapshot diário
-// do catálogo Skinport + Steam Market. Isso nos dá tendência/variação
-// sem depender da Pricempire.
+// Snapshot diário do catálogo Pricempire (usando preço Youpin) pra construir
+// histórico próprio. Tendência (subindo/caindo/estável) é calculada a partir
+// dos snapshots acumulados.
 //
 // Estratégia:
 //   - Job diário roda 1x/dia (default 03:00 UTC).
-//   - Puxa Skinport bulk, salva {date, items: {name: min_price_usd}} em
-//     `price_snapshots/{YYYY-MM-DD}`.
-//   - Endpoint GET /api/price-history?name=X&days=30 reconstrói a série
-//     buscando os últimos N snapshots do Firestore.
-//
-// Colunas (custo Firestore):
-//   - ~25.000 skins × 365 dias × ~40 bytes/entry = ~360MB/ano
-//   - Free tier: 1GB storage, 50k reads/dia, 20k writes/dia → folgado
-//
-// Em 7 dias de snapshots a tendência começa a ficar útil. Em 30 dias é
-// comparável à Pricempire. Roda "em paralelo" mesmo quando a Pricempire
-// está ativa, então o sistema tem fallback se a Pricempire cair.
+//   - Puxa Pricempire bulk, salva {date, items: {name: {p: youpin_cny, q: platforms}}}
+//     em `price_snapshots/{YYYY-MM-DD}/chunks/{idx}`.
+//   - Endpoint GET /api/price-history?name=X&days=30 reconstrói a série.
 
 const admin = require('firebase-admin');
-const { fetchSkinportItems } = require('./skinport');
+const { fetchPricempireItems, getYoupinPrice } = require('./pricempire');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -50,12 +41,11 @@ async function snapshotDailyPrices() {
     return { date, skipped: true, reason: 'already_complete' };
   }
 
-  const items = await fetchSkinportItems();
+  const items = await fetchPricempireItems();
   const names = Object.keys(items);
-  if (names.length === 0) return { date, skipped: true, reason: 'no_skinport_data' };
+  if (names.length === 0) return { date, skipped: true, reason: 'no_pricempire_data' };
 
-  // Firestore document tem limite de 1MB. 25k skins × ~40 bytes = 1MB exato.
-  // Vamos segmentar em chunks de 5000 pra ter margem.
+  // Firestore document tem limite de 1MB. Segmentamos em chunks de 5000 pra ter margem.
   const CHUNK_SIZE = 5000;
   let totalWritten = 0;
 
@@ -66,8 +56,11 @@ async function snapshotDailyPrices() {
     const payload = {};
     for (const n of chunk) {
       const it = items[n];
-      if (it && it.min_price != null) {
-        payload[n] = { p: it.min_price, q: it.quantity || 0 };
+      const youpin = getYoupinPrice(it);
+      if (youpin > 0) {
+        // q = número de plataformas com preço (proxy de liquidez)
+        const q = ['buff', 'youpin', 'c5game', 'csfloat', 'dmarket'].filter(p => parseFloat(it[p]) > 0).length;
+        payload[n] = { p: youpin, q };
       }
     }
     await chunkRef.set({ items: payload, count: Object.keys(payload).length }, { merge: false });
@@ -76,7 +69,7 @@ async function snapshotDailyPrices() {
 
   await ref.set({
     date,
-    source: 'skinport',
+    source: 'pricempire',
     itemsCount: totalWritten,
     chunks: Math.ceil(names.length / CHUNK_SIZE),
     complete: true,
@@ -107,7 +100,7 @@ async function getHistoryForSkin(skinName, days = 30) {
         if (items[skinName]) {
           result.push({
             date,
-            price_usd: items[skinName].p,
+            price_cny: items[skinName].p,
             quantity: items[skinName].q || 0,
           });
           break;
@@ -124,7 +117,7 @@ async function getHistoryForSkin(skinName, days = 30) {
 // Classifica tendência a partir do histórico próprio (mesmo formato que analysis.js espera)
 function classifyInternalTrend(points) {
   if (!Array.isArray(points) || points.length < 3) return null;
-  const prices = points.map(p => p.price_usd).filter(p => p > 0);
+  const prices = points.map(p => p.price_cny ?? p.price_usd ?? 0).filter(p => p > 0);
   if (prices.length < 3) return null;
 
   const recent = prices.slice(-7);
@@ -143,7 +136,7 @@ function classifyInternalTrend(points) {
     recentAvg: Math.round(recentAvg * 100) / 100,
     olderAvg: Math.round(olderAvg * 100) / 100,
     points: prices.length,
-    source: 'internal_skinport',
+    source: 'internal_pricempire',
   };
 }
 
