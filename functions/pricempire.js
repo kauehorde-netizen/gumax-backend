@@ -28,7 +28,10 @@
 //     "lastUpdated": "2026-04-23T..."
 //   }
 
-const PRICEMPIRE_URL = 'https://api.pricempire.com/v4/cs2/items/all';
+// Endpoint correto da Pricempire v4 (descoberto via FlowSkins production).
+// Auth via query string `api_key=`. Lista de sources é obrigatória.
+const PRICEMPIRE_V4_URL = (key) => `https://api.pricempire.com/v4/paid/items/prices?app_id=730&api_key=${key}&sources=buff163,youpin,steam,csfloat,c5game,csmoney&currency=CNY&avg=false&median=false&inflation_threshold=-1`;
+const PRICEMPIRE_V3_URL = (key) => `https://api.pricempire.com/v3/items/prices?api_key=${key}&currency=CNY&appId=730`;
 const CACHE_TTL = 15 * 60 * 1000; // 15 min
 
 const CORS = {
@@ -42,7 +45,20 @@ function json(code, body) {
   return { statusCode: code, headers: CORS, body: JSON.stringify(body) };
 }
 
-// Busca catálogo inteiro da Pricempire, com cache em memória
+// Normaliza: {item_name: {buff163: {price, count}, youpin: {price, count}, ...}}
+// → {item_name: {buff: 12.34, youpin: 11.90, ...}, market_hash_name, ...}
+// O Gumax usa nomes simplificados (buff em vez de buff163) pra compatibilidade.
+function normalizeV4Item(marketHashName, priceMap) {
+  const flat = { market_hash_name: marketHashName };
+  const mapKey = { buff163: 'buff', youpin: 'youpin', steam: 'steam', csfloat: 'csfloat', c5game: 'c5game', csmoney: 'csmoney' };
+  for (const [src, mapped] of Object.entries(mapKey)) {
+    const entry = priceMap[src];
+    if (entry && entry.price != null) flat[mapped] = entry.price;
+  }
+  return flat;
+}
+
+// Busca catálogo inteiro via Pricempire v4 paid, com fallback pra v3 se v4 falhar
 async function fetchPricempireItems() {
   if (global._pricempireCache
       && global._pricempireCache.ts
@@ -54,39 +70,73 @@ async function fetchPricempireItems() {
     console.warn('[Pricempire] PRICEMPIRE_API_KEY not configured');
     return global._pricempireCache?.data || {};
   }
-  try {
-    console.log('[Pricempire] Fetching full catalog...');
-    const resp = await fetch(PRICEMPIRE_URL, {
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'User-Agent': 'Gumax-Backend/1.0',
-      },
-      timeout: 30000,
-    });
-    if (!resp.ok) throw new Error(`Pricempire error: ${resp.status}`);
-    const raw = await resp.json();
 
-    // A API retorna { "AK-47 | Redline (Field-Tested)": {buff, youpin, ...}, ... }
-    // OU array de objetos com market_hash_name. Tratamos os dois casos.
-    const byName = Object.create(null);
-    if (Array.isArray(raw)) {
-      for (const it of raw) {
-        if (!it || !it.market_hash_name) continue;
-        byName[it.market_hash_name] = { ...it, market_hash_name: it.market_hash_name };
+  // ── v4 paid ──
+  try {
+    console.log('[Pricempire] Fetching v4/paid/items/prices...');
+    const resp = await fetch(PRICEMPIRE_V4_URL(apiKey), {
+      headers: { 'User-Agent': 'Gumax-Backend/1.0' },
+    });
+    console.log(`[Pricempire] v4 status=${resp.status}`);
+    if (resp.ok) {
+      const raw = await resp.json();
+      const byName = Object.create(null);
+      if (Array.isArray(raw)) {
+        for (const entry of raw) {
+          if (!entry.market_hash_name) continue;
+          const priceMap = {};
+          if (Array.isArray(entry.prices)) {
+            for (const p of entry.prices) {
+              if (p.provider_key && p.price != null) priceMap[p.provider_key] = { price: p.price, count: p.count };
+            }
+          }
+          if (Object.keys(priceMap).length > 0) {
+            byName[entry.market_hash_name] = normalizeV4Item(entry.market_hash_name, priceMap);
+          }
+        }
+      } else if (raw && typeof raw === 'object') {
+        for (const [name, data] of Object.entries(raw)) {
+          byName[name] = normalizeV4Item(name, data);
+        }
       }
-    } else if (raw && typeof raw === 'object') {
-      for (const [name, data] of Object.entries(raw)) {
-        byName[name] = { market_hash_name: name, ...data };
+      if (Object.keys(byName).length > 0) {
+        global._pricempireCache = { data: byName, ts: Date.now(), version: 'v4paid' };
+        console.log(`[Pricempire] v4 OK — ${Object.keys(byName).length} items`);
+        return byName;
+      }
+      console.warn('[Pricempire] v4 returned empty payload');
+    }
+  } catch (e) {
+    console.error('[Pricempire] v4 error:', e.message);
+  }
+
+  // ── v3 fallback ──
+  try {
+    console.log('[Pricempire] Trying v3 fallback...');
+    const resp = await fetch(PRICEMPIRE_V3_URL(apiKey), {
+      headers: { 'User-Agent': 'Gumax-Backend/1.0' },
+    });
+    if (resp.ok) {
+      const raw = await resp.json();
+      const src = raw?.data || raw || {};
+      const byName = Object.create(null);
+      for (const [name, data] of Object.entries(src)) {
+        if (typeof data === 'object' && data) {
+          byName[name] = { market_hash_name: name, ...data };
+        }
+      }
+      if (Object.keys(byName).length > 0) {
+        global._pricempireCache = { data: byName, ts: Date.now(), version: 'v3' };
+        console.log(`[Pricempire] v3 OK — ${Object.keys(byName).length} items`);
+        return byName;
       }
     }
-
-    global._pricempireCache = { data: byName, ts: Date.now() };
-    console.log(`[Pricempire] Cached ${Object.keys(byName).length} items`);
-    return byName;
   } catch (e) {
-    console.error('[Pricempire] Fetch error:', e.message);
-    return global._pricempireCache?.data || {};
+    console.error('[Pricempire] v3 error:', e.message);
   }
+
+  console.error('[Pricempire] ALL sources failed');
+  return global._pricempireCache?.data || {};
 }
 
 // Normaliza nome pra matching fuzzy (mesmo padrão do skinport.js antigo)
