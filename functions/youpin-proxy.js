@@ -10,8 +10,101 @@ const CORS = {
   'Access-Control-Allow-Headers': 'Content-Type',
 };
 
+// Top-sellers: página o GetCsGoPagedList SEM keyWords, ordenando por vendas.
+// Cacheado em memória por 1h pra reduzir carga.
+const TOP_CACHE_TTL = 60 * 60 * 1000;
+async function fetchYoupinTopSellers(limit = 50) {
+  if (global._youpinTopCache && Date.now() - global._youpinTopCache.ts < TOP_CACHE_TTL
+      && global._youpinTopCache.limit >= limit) {
+    return global._youpinTopCache.data.slice(0, limit);
+  }
+
+  const pageSize = 40;
+  const pages = Math.ceil(limit / pageSize);
+  const all = [];
+
+  for (let page = 1; page <= pages; page++) {
+    try {
+      const postData = JSON.stringify({
+        listType: '30',
+        gameId: '730',
+        keyWords: '',
+        pageIndex: page,
+        pageSize,
+        sortType: '1',    // 1 = order by popularity/volume
+        listSortType: '2',
+      });
+
+      const result = await new Promise((resolve) => {
+        const options = {
+          hostname: 'api.youpin898.com',
+          port: 443,
+          path: '/api/homepage/es/template/GetCsGoPagedList',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'Referer': 'https://www.youpin898.com/',
+            'Accept': 'application/json',
+            'Origin': 'https://www.youpin898.com',
+          },
+          timeout: 10000,
+        };
+        const req = https.request(options, (res) => {
+          let body = '';
+          res.on('data', c => body += c);
+          res.on('end', () => {
+            try {
+              const data = JSON.parse(body);
+              resolve(data?.Data || []);
+            } catch { resolve([]); }
+          });
+        });
+        req.on('error', () => resolve([]));
+        req.on('timeout', () => { req.destroy(); resolve([]); });
+        req.write(postData);
+        req.end();
+      });
+
+      for (const i of result) {
+        all.push({
+          name: i.CommodityName || '',
+          price_cny: parseFloat(i.SellMinPrice) || parseFloat(i.Price) || 0,
+          onSale: i.OnSaleCount || 0,
+          total: i.TotalCount || 0,
+          iconUrl: i.IconUrl || '',
+          tradeable: i.Tradable !== false,
+        });
+      }
+      if (result.length < pageSize) break; // fim
+    } catch (e) {
+      console.log('[Youpin top] page', page, e.message);
+      break;
+    }
+  }
+
+  global._youpinTopCache = { data: all, ts: Date.now(), limit };
+  return all.slice(0, limit);
+}
+
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
+
+  const path = event.path || '';
+
+  // GET /api/youpin/top-sellers?limit=50
+  if (event.httpMethod === 'GET' && path.endsWith('/top-sellers')) {
+    const q = event.queryStringParameters || {};
+    const limit = Math.min(100, Math.max(1, parseInt(q.limit, 10) || 50));
+    try {
+      const items = await fetchYoupinTopSellers(limit);
+      return json(200, { count: items.length, items, cachedAt: global._youpinTopCache?.ts || null });
+    } catch (e) {
+      return json(500, { error: e.message });
+    }
+  }
+
   if (event.httpMethod !== 'POST') return json(405, { error: 'POST only' });
 
   try {
@@ -28,7 +121,6 @@ exports.handler = async (event) => {
     if (items && Array.isArray(items)) {
       const batch = items.slice(0, 20);
       const results = {};
-      // Query in parallel, max 10 concurrent
       for (let i = 0; i < batch.length; i += 10) {
         const chunk = batch.slice(i, i + 10);
         const promises = chunk.map(name => queryYoupin(name).catch(e => ({ item: name, price: 0, error: e.message })));
@@ -46,6 +138,8 @@ exports.handler = async (event) => {
     return json(500, { error: e.message });
   }
 };
+
+exports.fetchYoupinTopSellers = fetchYoupinTopSellers;
 
 async function queryYoupin(itemName) {
   const postData = JSON.stringify({
