@@ -367,8 +367,15 @@ exports.handler = async (event) => {
   const uid = decoded.uid;
 
   // Cache por (skinName, tier). Se bater cache, não cobramos de novo.
+  // Se o cache tem score null (bug antigo) OU breakdown.brl vazio, ignora e refaz
+  // MAS também não cobra de novo (já foi cobrado).
   const cached = await getCached(name, tier);
-  if (cached) {
+  const cacheIsHealthy = cached && cached.score && (
+    tier !== 'full' ||
+    (cached.breakdown && cached.breakdown.brl && Object.keys(cached.breakdown.brl).length > 0)
+  );
+  const cacheExistsButUnhealthy = cached && !cacheIsHealthy;
+  if (cached && cacheIsHealthy) {
     return json(200, { ...cached, fromCache: true });
   }
 
@@ -389,8 +396,9 @@ exports.handler = async (event) => {
   const steamBRL = steam?.lowest_price_brl || null;
 
   // ── Cobrar créditos AGORA (se tier pago) ──────────────────────────────
+  // Se cache unhealthy existia, já cobramos antes — não cobra de novo (refaz de graça)
   const cost = COSTS[tier];
-  if (cost > 0) {
+  if (cost > 0 && !cacheExistsButUnhealthy) {
     const result = await consume(uid, cost, `analysis:${tier}:${name}`, { skin: name, tier });
     if (!result.ok) {
       return json(402, { error: 'insufficient_credits', balance: result.balance, needed: cost, tier });
