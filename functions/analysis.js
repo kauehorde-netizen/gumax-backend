@@ -126,32 +126,63 @@ async function fetchPricempireHistory(skinName) {
 }
 
 // ── Score computation a partir da stack híbrida ────────────────────────────
-// Entra: { skinportUSD, steamBRL, pricempireCNY?, usdRate, cnyRate }
-// Converte tudo pra BRL e calcula score/spread.
-function computeScore(prices) {
-  // prices: { [platform]: valueBRL }
+// Entra: { [platform]: valueBRL } + opcionalmente suggestedBRL (sugestão Skinport)
+// Se tiver múltiplas plataformas, calcula via spread + deal quality.
+// Se tiver só 1, compara contra suggested_price da Skinport pra saber se tá caro/barato.
+function computeScore(prices, suggestedBRL) {
   const entries = Object.entries(prices).filter(([, v]) => v != null && v > 0);
-  if (entries.length < 2) return null;
+  if (entries.length === 0) return null;
 
   const values = entries.map(([, v]) => v);
   const lowest = Math.min(...values);
   const highest = Math.max(...values);
   const avg = values.reduce((a, b) => a + b, 0) / values.length;
+  const cheapestPlatform = entries.find(([, v]) => v === lowest)?.[0] || null;
 
-  if (lowest === 0 || highest === lowest) {
-    return { score: 50, spread: 0, lowest, highest, avg, cheapestPlatform: entries.find(([, v]) => v === lowest)?.[0] };
+  // Caso 1: uma só fonte → compara com suggested (se disponível)
+  if (entries.length === 1) {
+    if (!suggestedBRL || suggestedBRL <= 0) {
+      // Sem referência, devolve apenas o preço e score neutro
+      return {
+        score: 50,
+        spread: 0,
+        lowest: rd(lowest), highest: rd(lowest), avg: rd(lowest),
+        cheapestPlatform,
+        breakdown: Object.fromEntries(entries.map(([k, v]) => [k, rd(v)])),
+        singleSource: true,
+      };
+    }
+    // deal ratio = lowest / suggested. <1 = está abaixo do sugerido (deal bom).
+    const ratio = lowest / suggestedBRL;
+    // Mapeia: 0.7 (30% abaixo) → 95; 1.0 → 50; 1.3 → 5.
+    const rawScore = Math.min(100, Math.max(0, 100 - (ratio - 0.7) * 150));
+    const savingsPct = (1 - ratio) * 100; // positivo = está abaixo do sugerido
+    return {
+      score: Math.round(rawScore),
+      spread: rd(Math.max(0, savingsPct), 1),
+      lowest: rd(lowest),
+      highest: rd(suggestedBRL),
+      avg: rd((lowest + suggestedBRL) / 2),
+      cheapestPlatform,
+      breakdown: Object.fromEntries(entries.map(([k, v]) => [k, rd(v)])),
+      singleSource: true,
+      suggested: rd(suggestedBRL),
+    };
   }
 
+  // Caso 2+: múltiplas plataformas (como era antes)
+  if (highest === lowest) {
+    return { score: 50, spread: 0, lowest: rd(lowest), highest: rd(highest), avg: rd(avg), cheapestPlatform, breakdown: Object.fromEntries(entries.map(([k, v]) => [k, rd(v)])) };
+  }
   const spread = ((highest - lowest) / highest) * 100;
   const rawScore = Math.min(100, Math.max(0, 100 - ((lowest / avg) - 0.5) * 100));
-
   return {
     score: Math.round(rawScore),
     spread: rd(spread, 1),
     lowest: rd(lowest),
     highest: rd(highest),
     avg: rd(avg),
-    cheapestPlatform: entries.find(([, v]) => v === lowest)?.[0] || null,
+    cheapestPlatform,
     breakdown: Object.fromEntries(entries.map(([k, v]) => [k, rd(v)])),
   };
 }
@@ -385,7 +416,11 @@ exports.handler = async (event) => {
     }
   }
 
-  const scoreData = computeScore(pricesBRL);
+  // suggestedBRL da Skinport: usado quando só temos 1 fonte de preço
+  const suggestedBRL = skinportItem.suggested_price != null
+    ? skinportItem.suggested_price * usdRate
+    : null;
+  const scoreData = computeScore(pricesBRL, suggestedBRL);
 
   // ── Tendência: próprio (Firestore snapshots) ou Pricempire ─────────────
   let trend = null;
