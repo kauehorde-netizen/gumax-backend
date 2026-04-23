@@ -306,6 +306,26 @@ setInterval(async () => {
   } catch (e) { console.error('[Subscription cron]', e.message); }
 }, 6 * 60 * 60 * 1000); // 6h
 
+// Pricempire: pré-carrega e persiste catálogo no Firestore 1x por dia.
+// Evita que o primeiro usuário do dia tenha que esperar 5-10s pela Pricempire.
+// Também aquece o cache no boot — antes de qualquer user chegar.
+function schedulePricempirePrewarm() {
+  const prewarm = async () => {
+    try {
+      const mod = pricempireMod;
+      if (!mod || !mod.fetchPricempireItems) return;
+      const start = Date.now();
+      const items = await mod.fetchPricempireItems();
+      console.log(`[Pricempire prewarm] ${Object.keys(items).length} items in ${Date.now() - start}ms`);
+    } catch (e) { console.error('[Pricempire prewarm]', e.message); }
+  };
+  // Primeiro prewarm 30s depois do boot (dá tempo da Firebase inicializar)
+  setTimeout(prewarm, 30 * 1000);
+  // Depois a cada 12h (garante que no pior caso o cache tá <12h stale)
+  setInterval(prewarm, 12 * 60 * 60 * 1000);
+}
+schedulePricempirePrewarm();
+
 // Price History: snapshot diário do catálogo Skinport → Firestore.
 // Rodamos 1x/dia às ~03h UTC; se o servidor reiniciar, roda de novo no próximo tick.
 // O snapshot é idempotente (skipa se já existe completo naquela data).
