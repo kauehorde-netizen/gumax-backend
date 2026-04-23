@@ -309,6 +309,54 @@ exports.handler = async (event) => {
       };
     }
 
+    // ═══ GET PRICING CONFIG ═══
+    // Retorna { mode, fixedRate, margin } + cotação atual do Google pra preview.
+    if (action === 'get-pricing') {
+      const { getPricingConfig, getConversionFactor } = require('./pricing');
+      const { fetchExchangeRate, getRateCache } = require('./exchange-rate');
+      const [cfg, googleRate] = await Promise.all([
+        getPricingConfig(true),      // force refresh
+        fetchExchangeRate().catch(() => 0),
+      ]);
+      const cache = getRateCache();
+      const factor = cfg.mode === 'rate' ? googleRate : cfg.fixedRate;
+      return {
+        statusCode: 200,
+        headers: H,
+        body: JSON.stringify({
+          success: true,
+          config: cfg,
+          currentFactor: factor,
+          googleRate,
+          rateSource: cache.source,
+          preview: {
+            // Exemplo: skin a 100 CNY no Youpin
+            youpinCNY: 100,
+            originalBRL: Math.round(100 * factor * 100) / 100,
+            saleBRL: Math.round(100 * factor * (1 + cfg.margin) * 100) / 100,
+          },
+        }),
+      };
+    }
+
+    // ═══ UPDATE PRICING CONFIG ═══
+    // body: { mode?, fixedRate?, margin? }
+    if (action === 'update-pricing') {
+      const { setPricingConfig } = require('./pricing');
+      const { mode, fixedRate, margin } = body;
+      try {
+        const cfg = await setPricingConfig({ mode, fixedRate, margin }, 'admin');
+        console.log('[Admin] Updated pricing:', cfg);
+        return {
+          statusCode: 200,
+          headers: H,
+          body: JSON.stringify({ success: true, config: cfg }),
+        };
+      } catch (e) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: e.message }) };
+      }
+    }
+
     // ═══ GET ORDER STATS ═══
     if (action === 'stats') {
       // Get orders from last 30 days
