@@ -1,29 +1,25 @@
-// ═══ Gumax — Catalog Endpoint (Skinport-based) ═══
-// Retorna catálogo paginado de skins com preços da Skinport + margem configurável.
+// ═══ Gumax — Catalog Endpoint (Pricempire-based) ═══
+// Retorna catálogo paginado de skins com preços da Pricempire (fonte: Youpin).
 // Suporta filtros: category, search, priceRange, deliveryType.
 // Suporta ordenação: price, name, discount.
-//
-// Mudança recente: migramos de Pricempire pra Skinport (gratuito, bulk).
-// O bulk da Skinport retorna ~25k skins CS2 em ~5MB JSON, cacheado 5min no
-// skinport.js. O catálogo agora roda 100% no free tier.
 
-const { fetchSkinportItems } = require('./skinport');
+const { fetchPricempireItems, getYoupinPrice, buildIconUrl } = require('./pricempire');
 
-// Cotação USD→BRL (Skinport retorna em USD por padrão)
+// Cotação CNY→BRL (Pricempire retorna em CNY)
 async function fetchExchangeRate() {
-  if (global._usdBrlCache && global._usdBrlCache.ts && Date.now() - global._usdBrlCache.ts < 60 * 60 * 1000) {
-    return global._usdBrlCache.value;
+  if (global._cnyBrlCache && global._cnyBrlCache.ts && Date.now() - global._cnyBrlCache.ts < 60 * 60 * 1000) {
+    return global._cnyBrlCache.value;
   }
   try {
-    const response = await fetch('https://api.exchangerate-api.com/v4/latest/USD', { timeout: 5000 });
+    const response = await fetch('https://api.exchangerate-api.com/v4/latest/CNY', { timeout: 5000 });
     const data = await response.json();
-    const rate = data.rates?.BRL || 5.1;
-    global._usdBrlCache = { value: rate, ts: Date.now() };
-    console.log(`[Catalog] Exchange rate: USD 1 = BRL ${rate.toFixed(3)}`);
+    const rate = data.rates?.BRL || 0.68;
+    global._cnyBrlCache = { value: rate, ts: Date.now() };
+    console.log(`[Catalog] Exchange rate: CNY 1 = BRL ${rate.toFixed(3)}`);
     return rate;
   } catch (e) {
     console.error('[Catalog] Exchange rate error:', e.message);
-    return global._usdBrlCache?.value || 5.1;
+    return global._cnyBrlCache?.value || 0.68;
   }
 }
 
@@ -118,9 +114,9 @@ exports.handler = async (event) => {
       sortOrder = 'asc',
     } = body;
 
-    // Fetch paralelo: Skinport bulk, taxa USD→BRL, config, estoque
-    const [skinportItems, rate, config, inStock] = await Promise.all([
-      fetchSkinportItems(),
+    // Fetch paralelo: Pricempire bulk (Youpin-base), taxa CNY→BRL, config, estoque
+    const [pricempireItems, rate, config, inStock] = await Promise.all([
+      fetchPricempireItems(),
       fetchExchangeRate(),
       getFirestoreConfig(),
       deliveryType === 'full' ? getInStockItems() : Promise.resolve([]),
@@ -132,17 +128,17 @@ exports.handler = async (event) => {
     let items = [];
 
     if (deliveryType === 'full' && inStock.length > 0) {
-      // "Full" delivery: só itens em estoque admin
+      // "Full" delivery: só itens em estoque admin (sincronizados via Steam Inventory)
       for (const stock of inStock) {
-        const buyPriceUSD = stock.buyPriceUSD || (stock.buyPrice ? stock.buyPrice * 0.14 : 0); // legacy CNY→USD
-        const marginedUSD = calculateMargin(buyPriceUSD, margin, categoryMargins, stock.type || '');
-        const brlPrice = rd(marginedUSD * rate);
+        const buyPriceCNY = stock.buyPriceCNY || stock.buyPrice || 0;
+        const marginedCNY = calculateMargin(buyPriceCNY, margin, categoryMargins, stock.type || '');
+        const brlPrice = rd(marginedCNY * rate);
         items.push({
           id: stock.id,
           name: stock.name,
           price: brlPrice,
-          originalPrice: rd(buyPriceUSD * rate),
-          discount: buyPriceUSD > 0 ? rd(((marginedUSD - buyPriceUSD) / buyPriceUSD) * 100) : 0,
+          originalPrice: rd(buyPriceCNY * rate),
+          discount: buyPriceCNY > 0 ? rd(((marginedCNY - buyPriceCNY) / buyPriceCNY) * 100) : 0,
           wear: stock.wear || 'N/A',
           float: stock.float || null,
           rarity: stock.rarity || 'Common',
@@ -154,30 +150,29 @@ exports.handler = async (event) => {
         });
       }
     } else {
-      // "Normal" delivery: catálogo Skinport com margem
-      for (const [name, it] of Object.entries(skinportItems)) {
-        const usdPrice = parseFloat(it.min_price);
-        if (!Number.isFinite(usdPrice) || usdPrice <= 0) continue;
+      // "Normal" delivery: catálogo Pricempire (preço Youpin) com margem
+      for (const [name, it] of Object.entries(pricempireItems)) {
+        const cnyPrice = getYoupinPrice(it);
+        if (!Number.isFinite(cnyPrice) || cnyPrice <= 0) continue;
 
-        const cat = inferCategory(name);
-        const marginedUSD = calculateMargin(usdPrice, margin, categoryMargins, cat);
-        const brlPrice = rd(marginedUSD * rate);
+        const cat = it.type || inferCategory(name);
+        const marginedCNY = calculateMargin(cnyPrice, margin, categoryMargins, cat);
+        const brlPrice = rd(marginedCNY * rate);
 
         items.push({
           id: name.replace(/\s+/g, '_').slice(0, 120),
           name,
           price: brlPrice,
-          originalPrice: rd(usdPrice * rate),
-          discount: rd(((marginedUSD - usdPrice) / usdPrice) * 100),
+          originalPrice: rd(cnyPrice * rate),
+          discount: rd(((marginedCNY - cnyPrice) / cnyPrice) * 100),
           wear: inferWearFromName(name),
           float: null,
-          rarity: inferRarity(name),
+          rarity: it.rarity || inferRarity(name),
           type: cat,
-          iconUrl: '',
+          iconUrl: buildIconUrl(it.icon),
           inStock: false,
-          quantity: it.quantity || 0,
           deliveryDays: config.deliveryNormalTime || 720,
-          source: 'skinport',
+          source: 'pricempire',
         });
       }
     }
@@ -216,10 +211,10 @@ exports.handler = async (event) => {
         success: true,
         items: paginatedItems,
         pagination: { page, limit, total, totalPages },
-        exchangeRate: { usdBrl: rd(rate) },
+        exchangeRate: { cnyBrl: rd(rate) },
         margin,
         deliveryType,
-        source: deliveryType === 'full' ? 'stock' : 'skinport',
+        source: deliveryType === 'full' ? 'stock' : 'pricempire',
       }),
     };
   } catch (e) {
