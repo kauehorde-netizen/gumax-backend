@@ -402,10 +402,17 @@ async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
     ranked.sort(() => Math.random() - 0.5);
   }
 
-  // Aplica pricing config (modo fixed vs rate + margem) em cada item
+  // Aplica pricing config — modelo novo:
+  //   fixed → saleFactor = fixedRate (user escolheu o R$/¥ final)
+  //   rate  → saleFactor = googleRate + surcharge (cotação + R$ fixos de lucro)
+  // Pro strikethrough (preço Steam original) usamos o fator BASE sem o surcharge,
+  // pra mostrar o valor "de face" em R$ sem margem embutida.
   const top = ranked.slice(0, limit);
-  const { getPricingConfig, getConversionFactor, applyPricing } = require('./pricing');
-  const [cfg, factor] = await Promise.all([getPricingConfig(), getConversionFactor()]);
+  const { getConversionFactor, getBaseFactor, applyPricing } = require('./pricing');
+  const [saleFactor, baseFactor] = await Promise.all([
+    getConversionFactor(),
+    getBaseFactor(),
+  ]);
 
   return top.map(x => {
     const steamCNY = parseFloat(x.item.steam) || 0;
@@ -415,8 +422,8 @@ async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
       name: x.name,
       price_cny: x.youpin,
       steam_price_cny: steamEstCNY,
-      originalBRL: applyPricing(steamEstCNY, factor, 0),      // strikethrough
-      saleBRL: applyPricing(x.youpin, factor, cfg.margin),    // preço final de venda
+      originalBRL: applyPricing(steamEstCNY, baseFactor),     // strikethrough (Steam puro)
+      saleBRL: applyPricing(x.youpin, saleFactor),            // preço final de venda
       onSale: x.youpinCount || x.platforms,
       total: x.volume || x.platforms,
       rarity: x.item.rarity || 'Common',
