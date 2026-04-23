@@ -18,7 +18,7 @@
 
 const admin = require('firebase-admin');
 const https = require('https');
-const { fetchSkinportItems } = require('./skinport');
+const { fetchPricempireItems, getYoupinPrice } = require('./pricempire');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -88,22 +88,22 @@ async function fetchInventory(steamId) {
   return await httpGetJson(url, { timeout: 20000 });
 }
 
-// Pega a cotação USD→BRL (usa cache in-memory se já carregou)
-async function fetchUsdBrl() {
-  if (global._usdBrlCache && Date.now() - global._usdBrlCache.ts < 60 * 60 * 1000) {
-    return global._usdBrlCache.value;
+// Cotação CNY→BRL (Pricempire retorna em CNY)
+async function fetchCnyBrl() {
+  if (global._cnyBrlCache && Date.now() - global._cnyBrlCache.ts < 60 * 60 * 1000) {
+    return global._cnyBrlCache.value;
   }
   try {
-    const r = await fetch('https://api.exchangerate-api.com/v4/latest/USD', { timeout: 5000 });
+    const r = await fetch('https://api.exchangerate-api.com/v4/latest/CNY', { timeout: 5000 });
     const d = await r.json();
-    const rate = d.rates?.BRL || 5.1;
-    global._usdBrlCache = { value: rate, ts: Date.now() };
+    const rate = d.rates?.BRL || 0.68;
+    global._cnyBrlCache = { value: rate, ts: Date.now() };
     return rate;
-  } catch { return global._usdBrlCache?.value || 5.1; }
+  } catch { return global._cnyBrlCache?.value || 0.68; }
 }
 
 // ── Sync core ─────────────────────────────────────────────────────────────
-async function syncSingleAccount(steamId, skinportIndex, usdRate) {
+async function syncSingleAccount(steamId, pricempireIndex, cnyRate) {
   const [inventory, persona] = await Promise.all([
     fetchInventory(steamId),
     fetchPersona(steamId),
@@ -137,9 +137,9 @@ async function syncSingleAccount(steamId, skinportIndex, usdRate) {
     const exterior = pickTag(desc.tags, 'Exterior');
     const wearCode = extractWear(marketHashName);
 
-    // Preço via Skinport (se disponível)
-    const skinportItem = skinportIndex[marketHashName];
-    const buyPriceUSD = skinportItem?.min_price != null ? skinportItem.min_price : null;
+    // Preço via Pricempire (base: Youpin CNY)
+    const pricempireItem = pricempireIndex[marketHashName];
+    const buyPriceCNY = pricempireItem ? getYoupinPrice(pricempireItem) : 0;
 
     const docId = `steam_${steamId}_${asset.assetid}`;
     const stockDoc = {
@@ -160,8 +160,8 @@ async function syncSingleAccount(steamId, skinportIndex, usdRate) {
       inStock: true,
       active: true,
       lastSyncAt: new Date().toISOString(),
-      buyPriceUSD: buyPriceUSD,
-      buyPriceBRL: buyPriceUSD != null ? +(buyPriceUSD * usdRate).toFixed(2) : null,
+      buyPriceCNY: buyPriceCNY > 0 ? buyPriceCNY : null,
+      buyPriceBRL: buyPriceCNY > 0 ? +(buyPriceCNY * cnyRate).toFixed(2) : null,
       source: 'steam_inventory',
     };
     batch.set(db.collection('stock').doc(docId), stockDoc, { merge: true });
@@ -203,16 +203,16 @@ async function syncInventory(steamIds) {
   const ids = steamIds.map(s => String(s).trim()).filter(s => /^\d{17}$/.test(s));
   if (ids.length === 0) throw new Error('no valid steamIds (expected 17-digit SteamID64)');
 
-  const [skinportIndex, usdRate] = await Promise.all([
-    fetchSkinportItems(),
-    fetchUsdBrl(),
+  const [pricempireIndex, cnyRate] = await Promise.all([
+    fetchPricempireItems(),
+    fetchCnyBrl(),
   ]);
 
   const results = [];
   const syncTime = new Date().toISOString();
   for (const sid of ids) {
     try {
-      const r = await syncSingleAccount(sid, skinportIndex, usdRate);
+      const r = await syncSingleAccount(sid, pricempireIndex, cnyRate);
       r.lastSyncAt = syncTime;
       results.push(r);
     } catch (e) {
