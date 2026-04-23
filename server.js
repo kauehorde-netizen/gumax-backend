@@ -108,32 +108,65 @@ function wrapHandler(handler) {
 }
 
 // ── Load all function handlers ──
-const catalogHandler = require('./functions/catalog').handler;
-const skinDetailHandler = require('./functions/skin-detail').handler;
-const skinIconHandler = require('./functions/skin-icon').handler;
-const youpinProxyHandler = require('./functions/youpin-proxy').handler;
-const steamAuthHandler = require('./functions/steam-auth').handler;
-const createOrderHandler = require('./functions/create-order').handler;
-const checkPixHandler = require('./functions/check-pix').handler;
-const exchangeRateHandler = require('./functions/exchange-rate').handler;
-const adminHandler = require('./functions/admin').handler;
-const creditsHandler = require('./functions/credits').handler;
-const analysisHandler = require('./functions/analysis').handler;
-const subscriptionHandler = require('./functions/subscription').handler;
-const creditsPurchaseHandler = require('./functions/credits-purchase').handler;
-const pricempireHandler = require('./functions/pricempire').handler;
-const steamMarketHandler = require('./functions/steam-market').handler;
-const priceHistoryHandler = require('./functions/price-history').handler;
-// Módulos opcionais: se o arquivo não foi deployado ainda, desabilita a rota em vez de crashar
-let steamInventoryHandler = null;
-try {
-  steamInventoryHandler = require('./functions/steam-inventory').handler;
-} catch (e) {
-  console.warn('[server] steam-inventory not available — route will be disabled:', e.message);
+// Todos os handlers agora são carregados com tolerância a falha.
+// Se um módulo tiver dep faltando (ex: pricempire.js não deployado), só essa rota 503'a.
+const catalogMod         = safeRequire('./functions/catalog', 'catalog');
+const skinDetailMod      = safeRequire('./functions/skin-detail', 'skin-detail');
+const skinIconMod        = safeRequire('./functions/skin-icon', 'skin-icon');
+const youpinProxyMod     = safeRequire('./functions/youpin-proxy', 'youpin-proxy');
+const steamAuthMod       = safeRequire('./functions/steam-auth', 'steam-auth');
+const createOrderMod     = safeRequire('./functions/create-order', 'create-order');
+const checkPixMod        = safeRequire('./functions/check-pix', 'check-pix');
+const exchangeRateMod    = safeRequire('./functions/exchange-rate', 'exchange-rate');
+const adminMod           = safeRequire('./functions/admin', 'admin');
+const creditsMod         = safeRequire('./functions/credits', 'credits');
+const analysisMod        = safeRequire('./functions/analysis', 'analysis');
+const subscriptionMod    = safeRequire('./functions/subscription', 'subscription');
+const creditsPurchaseMod = safeRequire('./functions/credits-purchase', 'credits-purchase');
+
+const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
+const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
+const skinIconHandler        = skinIconMod?.handler    || disabledRoute('skin-icon');
+const youpinProxyHandler     = youpinProxyMod?.handler || disabledRoute('youpin-proxy');
+const steamAuthHandler       = steamAuthMod?.handler   || disabledRoute('steam-auth');
+const createOrderHandler     = createOrderMod?.handler || disabledRoute('create-order');
+const checkPixHandler        = checkPixMod?.handler    || disabledRoute('check-pix');
+const exchangeRateHandler    = exchangeRateMod?.handler || disabledRoute('exchange-rate');
+const adminHandler           = adminMod?.handler       || disabledRoute('admin');
+const creditsHandler         = creditsMod?.handler     || disabledRoute('credits');
+const analysisHandler        = analysisMod?.handler    || disabledRoute('analysis');
+const subscriptionHandler    = subscriptionMod?.handler || disabledRoute('subscription');
+const creditsPurchaseHandler = creditsPurchaseMod?.handler || disabledRoute('credits-purchase');
+// Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
+// Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
+function safeRequire(path, label) {
+  try {
+    return require(path);
+  } catch (e) {
+    console.warn(`[server] ${label} not available: ${e.message}`);
+    return null;
+  }
 }
-const { processShieldRefunds } = require('./functions/analysis');
-const { distributeMonthlyCredits } = require('./functions/subscription');
-const { snapshotDailyPrices } = require('./functions/price-history');
+const pricempireMod     = safeRequire('./functions/pricempire', 'pricempire');
+const steamMarketMod    = safeRequire('./functions/steam-market', 'steam-market');
+const priceHistoryMod   = safeRequire('./functions/price-history', 'price-history');
+const steamInventoryMod = safeRequire('./functions/steam-inventory', 'steam-inventory');
+const pricempireHandler     = pricempireMod?.handler     || disabledRoute('pricempire');
+const steamMarketHandler    = steamMarketMod?.handler    || disabledRoute('steam-market');
+const priceHistoryHandler   = priceHistoryMod?.handler   || disabledRoute('price-history');
+const steamInventoryHandler = steamInventoryMod?.handler || disabledRoute('steam-inventory');
+
+// Retorna um handler no formato event (compatível com wrapHandler) que sempre devolve 503
+function disabledRoute(name) {
+  return async () => ({
+    statusCode: 503,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ error: `${name} module not deployed` }),
+  });
+}
+const processShieldRefunds = analysisMod?.processShieldRefunds || (async () => ({ processed: 0, refunded: 0, skipped: 'analysis_not_loaded' }));
+const distributeMonthlyCredits = subscriptionMod?.distributeMonthlyCredits || (async () => ({ total: 0, distributed: 0, skipped: 'subscription_not_loaded' }));
+const snapshotDailyPrices = priceHistoryMod?.snapshotDailyPrices || (async () => ({ skipped: 'price_history_not_loaded' }));
 
 // ── Routes (with rate limiting) ──
 
@@ -231,12 +264,8 @@ app.post('/api/shield/process', rateLimit(60000, 5), async (req, res) => {
 });
 
 // Admin: sync de inventário Steam (pesado — 3 por minuto)
-if (steamInventoryHandler) {
-  app.post('/api/admin/sync-inventory', rateLimit(60000, 3), wrapHandler(steamInventoryHandler));
-  app.options('/api/admin/sync-inventory', (req, res) => res.sendStatus(204));
-} else {
-  app.post('/api/admin/sync-inventory', (req, res) => res.status(503).json({ error: 'steam-inventory module not deployed' }));
-}
+app.post('/api/admin/sync-inventory', rateLimit(60000, 3), wrapHandler(steamInventoryHandler || disabledRoute('steam-inventory')));
+app.options('/api/admin/sync-inventory', (req, res) => res.sendStatus(204));
 
 // Admin endpoints: 20 per minute (requires API key)
 app.post('/api/admin/update-margins', rateLimit(60000, 20), wrapHandler(adminHandler));
