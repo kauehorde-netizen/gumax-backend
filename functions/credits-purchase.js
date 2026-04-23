@@ -116,6 +116,10 @@ async function handleWebhook(event) {
   return json(200, { received: true, status: pay.status });
 }
 
+// Exportado pra ser chamado pelo subscription.js quando
+// o webhook unificado do MP identifica que o payment é de compra avulsa
+exports.handleWebhook = handleWebhook;
+
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 204, headers: CORS, body: '' };
