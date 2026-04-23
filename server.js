@@ -120,8 +120,12 @@ const creditsHandler = require('./functions/credits').handler;
 const analysisHandler = require('./functions/analysis').handler;
 const subscriptionHandler = require('./functions/subscription').handler;
 const creditsPurchaseHandler = require('./functions/credits-purchase').handler;
+const skinportHandler = require('./functions/skinport').handler;
+const steamMarketHandler = require('./functions/steam-market').handler;
+const priceHistoryHandler = require('./functions/price-history').handler;
 const { processShieldRefunds } = require('./functions/analysis');
 const { distributeMonthlyCredits } = require('./functions/subscription');
+const { snapshotDailyPrices } = require('./functions/price-history');
 
 // ── Routes (with rate limiting) ──
 
@@ -185,6 +189,20 @@ app.post('/api/credits/purchase', rateLimit(60000, 20), wrapHandler(creditsPurch
 app.post('/api/credits/purchase/webhook', wrapHandler(creditsPurchaseHandler)); // sem rate limit — MP
 app.options('/api/credits/purchase', (req, res) => res.sendStatus(204));
 
+// ── Skinport API (fonte principal de preços, grátis) ──
+app.get('/api/skinport/items', rateLimit(60000, 20), wrapHandler(skinportHandler));
+app.post('/api/skinport/item', rateLimit(60000, 60), wrapHandler(skinportHandler));
+app.options('/api/skinport/*', (req, res) => res.sendStatus(204));
+
+// ── Steam Market (cacheado 24h) ──
+app.post('/api/steam-market/price', rateLimit(60000, 30), wrapHandler(steamMarketHandler));
+app.options('/api/steam-market/*', (req, res) => res.sendStatus(204));
+
+// ── Price History (snapshots próprios) ──
+app.get('/api/price-history', rateLimit(60000, 30), wrapHandler(priceHistoryHandler));
+app.post('/api/price-history/snapshot', rateLimit(60000, 2), wrapHandler(priceHistoryHandler));
+app.options('/api/price-history', (req, res) => res.sendStatus(204));
+
 // ── Gumax Shield cron (admin-only trigger) ──
 app.post('/api/shield/process', rateLimit(60000, 5), async (req, res) => {
   const key = req.headers['x-admin-key'];
@@ -234,10 +252,29 @@ setInterval(async () => {
   } catch (e) { console.error('[Subscription cron]', e.message); }
 }, 6 * 60 * 60 * 1000); // 6h
 
+// Price History: snapshot diário do catálogo Skinport → Firestore.
+// Rodamos 1x/dia às ~03h UTC; se o servidor reiniciar, roda de novo no próximo tick.
+// O snapshot é idempotente (skipa se já existe completo naquela data).
+function scheduleDailySnapshot() {
+  const runSnapshot = async () => {
+    try {
+      const r = await snapshotDailyPrices();
+      console.log('[PriceHistory]', r);
+    } catch (e) { console.error('[PriceHistory cron]', e.message); }
+  };
+  // Primeira execução: em 5 min (dá tempo do server quentar), depois a cada 24h
+  setTimeout(() => {
+    runSnapshot();
+    setInterval(runSnapshot, 24 * 60 * 60 * 1000);
+  }, 5 * 60 * 1000);
+}
+scheduleDailySnapshot();
+
 // ── Start server ──
 app.listen(PORT, () => {
   console.log(`[Server] Gumax Skins API running on port ${PORT}`);
   console.log(`[Server] Routes: /api/catalog, /api/skin-detail, /api/skin-icon, /api/create-order, /api/check-pix`);
   console.log(`[Server] Credits: /api/credits/* , /api/analysis , /api/subscription/*`);
+  console.log(`[Server] Pricing: /api/skinport/* , /api/steam-market/* , /api/price-history`);
   console.log(`[Server] Admin: /api/admin/update-margins, /api/admin/add-stock, /api/admin/orders, /api/shield/process`);
 });
