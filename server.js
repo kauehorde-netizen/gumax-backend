@@ -147,6 +147,7 @@ app.options('/api/youpin-proxy', (req, res) => res.sendStatus(204));
 
 // Steam auth: 20 per minute
 app.get('/api/steam-auth', rateLimit(60000, 20), wrapHandler(steamAuthHandler));
+app.post('/api/steam-auth', rateLimit(60000, 20), wrapHandler(steamAuthHandler));
 app.get('/api/steam-auth/callback', rateLimit(60000, 20), wrapHandler(steamAuthHandler));
 app.options('/api/steam-auth', (req, res) => res.sendStatus(204));
 
