@@ -115,13 +115,26 @@ exports.handler = async (event) => {
 // Helper exportado para ser chamado direto pelos outros módulos (sem HTTP)
 exports.fetchSkinportItems = fetchSkinportItems;
 
-// Normaliza nome pra comparação fuzzy: lowercase, remove | () - e espaços duplicados
+// Normaliza nome pra comparação fuzzy: lowercase, expande abreviações de wear,
+// remove | () - e colapsa espaços.
+const WEAR_ABBR = {
+  '\\bfn\\b': 'factory new',
+  '\\bmw\\b': 'minimal wear',
+  '\\bft\\b': 'field tested',
+  '\\bww\\b': 'well worn',
+  '\\bbs\\b': 'battle scarred',
+  '\\bst\\b': 'stattrak',
+};
 function normalizeName(s) {
-  return String(s || '')
+  let out = String(s || '')
     .toLowerCase()
     .replace(/[|()★™\-]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+  for (const [abbr, full] of Object.entries(WEAR_ABBR)) {
+    out = out.replace(new RegExp(abbr, 'g'), full);
+  }
+  return out.replace(/\s+/g, ' ').trim();
 }
 
 // Busca por market_hash_name com fallback fuzzy:
