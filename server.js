@@ -192,6 +192,7 @@ app.options('/api/credits/purchase', (req, res) => res.sendStatus(204));
 
 // ── Skinport API (fonte principal de preços, grátis) ──
 app.get('/api/skinport/items', rateLimit(60000, 20), wrapHandler(skinportHandler));
+app.get('/api/skinport/suggest', rateLimit(60000, 60), wrapHandler(skinportHandler));
 app.post('/api/skinport/item', rateLimit(60000, 60), wrapHandler(skinportHandler));
 app.options('/api/skinport/*', (req, res) => res.sendStatus(204));
 
