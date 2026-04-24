@@ -157,6 +157,14 @@ async function syncSingleAccount(steamId, pricempireIndex, cnyRate, syncTime, st
     const pricempireItem = pricempireIndex[marketHashName];
     const buyPriceCNY = pricempireItem ? getYoupinPrice(pricempireItem) : 0;
 
+    // Inspect link da Steam (usado pra buscar float exato + pattern via CSFloat)
+    const inspectAction = Array.isArray(desc.actions)
+      ? desc.actions.find(a => /Inspect/i.test(a?.name || ''))
+      : null;
+    const inspectLink = inspectAction?.link
+      ?.replace('%owner_steamid%', steamId)
+      ?.replace('%assetid%', asset.assetid) || null;
+
     const docId = `steam_${steamId}_${asset.assetid}`;
     const stockDoc = {
       name: marketHashName,
@@ -167,6 +175,7 @@ async function syncSingleAccount(steamId, pricempireIndex, cnyRate, syncTime, st
       classid: asset.classid,
       instanceid: asset.instanceid,
       assetid: asset.assetid,
+      inspectLink,
       iconUrl: desc.icon_url ? `https://community.cloudflare.steamstatic.com/economy/image/${desc.icon_url}/256fx256f` : '',
       tradable: desc.tradable === 1 || desc.tradable === true,
       marketable: true,
@@ -257,6 +266,18 @@ async function syncInventory(steamIds) {
       lastInventorySyncResults: results,
     }, { merge: true });
   } catch {}
+
+  // Background: busca float exato + pattern pros items novos (não bloqueia a resposta)
+  // CSFloat rate-limited — processa em batch com throttle
+  setImmediate(async () => {
+    try {
+      const { enrichStockWithFloats } = require('./float-inspector');
+      const r = await enrichStockWithFloats();
+      console.log('[sync] float enrichment:', JSON.stringify(r));
+    } catch (e) {
+      console.error('[sync] float enrichment error:', e.message);
+    }
+  });
 
   return { syncTime, accounts: results, pruned: prunedCount };
 }
