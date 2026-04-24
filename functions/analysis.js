@@ -344,10 +344,15 @@ exports.handler = async (event) => {
   try { body = JSON.parse(event.body || '{}'); }
   catch { return json(400, { error: 'Invalid JSON' }); }
 
-  const { name, depth } = body;
+  const { name, depth, floatvalue, paintseed, paintindex } = body;
   if (!name) return json(400, { error: 'name is required' });
   const tier = depth || 'basic';
   if (!(tier in COSTS)) return json(400, { error: `Invalid depth. Use one of: ${Object.keys(COSTS).join(', ')}` });
+
+  // Pattern refinement params — ao passar float/paintseed/paintindex, a análise
+  // é enriquecida com tier de float + pattern tier (blue gems) + Doppler phase.
+  // Isso não adiciona custo (pattern-tiers.js roda em memória, só lookup).
+  const hasRefinement = floatvalue != null || paintseed != null || paintindex != null;
 
   // Auth obrigatório em todos os tiers (basic é grátis mas precisa estar logado)
   const decoded = await verifyIdToken(event.headers);
@@ -357,7 +362,9 @@ exports.handler = async (event) => {
   // Cache por (skinName, tier). Se bater cache, não cobramos de novo.
   // Se o cache tem score null (bug antigo) OU breakdown.brl vazio, ignora e refaz
   // MAS também não cobra de novo (já foi cobrado).
-  const cached = await getCached(name, tier);
+  // CACHE BYPASS: se houver refinement (float/pattern), não usa cache pois o
+  // resultado muda a cada combinação de float+paintseed+paintindex.
+  const cached = hasRefinement ? null : await getCached(name, tier);
   const cacheIsHealthy = cached && cached.score && (
     tier !== 'full' ||
     (cached.breakdown && cached.breakdown.brl && Object.keys(cached.breakdown.brl).length > 0)
@@ -502,7 +509,32 @@ exports.handler = async (event) => {
     };
   }
 
-  await setCached(name, tier, response);
+  // ── Pattern refinement (float tier, Doppler phase, Blue Gem) ──────────
+  // Roda se o cliente passou pelo menos um dos 3 params. Enriquece o response
+  // com info de posição no range do wear, phase de Doppler e tier de Blue Gem,
+  // além de um multiplicador de preço sugerido (factor) pra ajustar expectativa.
+  if (hasRefinement) {
+    try {
+      const { analyzePatternOverall } = require('./pattern-tiers');
+      const pattern = analyzePatternOverall(name, { floatvalue, paintseed, paintindex });
+      response.pattern = pattern;
+
+      // Preço base sugerido: usa o lowest do breakdown (ou Steam) como referência.
+      const baseBRL = response.score?.lowest ?? steamBRL ?? null;
+      if (baseBRL && pattern.combinedPriceFactor) {
+        response.pattern.adjustedPriceBRL = rd(baseBRL * pattern.combinedPriceFactor);
+        response.pattern.basePriceBRL = rd(baseBRL);
+      }
+    } catch (e) {
+      console.log('[Analysis] pattern-tiers error:', e.message);
+    }
+  }
+
+  // Só cacheia quando não houver refinement (cache é por name+tier; com refinement
+  // o resultado varia a cada input).
+  if (!hasRefinement) {
+    await setCached(name, tier, response);
+  }
   return json(200, response);
 };
 
