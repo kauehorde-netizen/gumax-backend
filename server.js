@@ -236,6 +236,7 @@ app.options('/api/credits/purchase', (req, res) => res.sendStatus(204));
 // ── Pricempire API (fonte canônica de preços, base Youpin) ──
 app.get('/api/pricempire/items', rateLimit(60000, 20), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/suggest', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+app.get('/api/pricempire/search', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.options('/api/pricempire/*', (req, res) => res.sendStatus(204));
 
