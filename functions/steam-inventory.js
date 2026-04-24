@@ -170,13 +170,29 @@ async function syncSingleAccount(steamId, pricempireIndex, cnyRate, syncTime, st
     const pricempireItem = pricempireIndex[marketHashName];
     const buyPriceCNY = pricempireItem ? getYoupinPrice(pricempireItem) : 0;
 
-    // Inspect link da Steam (usado pra buscar float exato + pattern via CSFloat)
-    const inspectAction = Array.isArray(desc.actions)
-      ? desc.actions.find(a => /Inspect/i.test(a?.name || ''))
-      : null;
-    const inspectLink = inspectAction?.link
-      ?.replace('%owner_steamid%', steamId)
-      ?.replace('%assetid%', asset.assetid) || null;
+    // Inspect link REAL da Steam (abre o visualizador 3D com float + pattern).
+    // Formato esperado: steam://rungame/730/SID/+csgo_econ_action_preview S{steamid}A{assetid}D{d}
+    // IGNORAR market_actions (que traz UGC preview %propid:...%, formato diferente).
+    // Só aceita link com parâmetros S/M + A + D (inspect real de item).
+    function findRealInspectLink(actions, sid, aid) {
+      if (!Array.isArray(actions)) return null;
+      for (const a of actions) {
+        if (!a?.link || !/Inspect/i.test(a.name || '')) continue;
+        // Substitui placeholders
+        let link = a.link
+          .replace('%owner_steamid%', sid)
+          .replace('%assetid%', aid);
+        // Valida formato: tem csgo_econ_action_preview E tem S/M + A + D params
+        if (/csgo_econ_action_preview/.test(link) && /[SM]\d+A\d+D\d+/.test(link)) {
+          return link;
+        }
+      }
+      return null;
+    }
+    // Tenta actions primeiro; market_actions como fallback (alguns items só têm isso)
+    const inspectLink = findRealInspectLink(desc.actions, steamId, asset.assetid)
+                     || findRealInspectLink(desc.market_actions, steamId, asset.assetid)
+                     || null;
 
     const docId = `steam_${steamId}_${asset.assetid}`;
     const stockDoc = {
@@ -280,17 +296,9 @@ async function syncInventory(steamIds) {
     }, { merge: true });
   } catch {}
 
-  // Background: busca float exato + pattern pros items novos (não bloqueia a resposta)
-  // CSFloat rate-limited — processa em batch com throttle
-  setImmediate(async () => {
-    try {
-      const { enrichStockWithFloats } = require('./float-inspector');
-      const r = await enrichStockWithFloats();
-      console.log('[sync] float enrichment:', JSON.stringify(r));
-    } catch (e) {
-      console.error('[sync] float enrichment error:', e.message);
-    }
-  });
+  // Float enrichment removido — CSFloat API não disponível do Railway (ENOTFOUND).
+  // Inspect link é capturado e salvo; frontend mostra botão "Ver no Steam" pro cliente
+  // abrir o visualizador 3D da Steam (que mostra float + pattern reais).
 
   return { syncTime, accounts: results, pruned: prunedCount };
 }
