@@ -322,6 +322,31 @@ async function setCached(skinName, tier, response) {
   }
 }
 
+// ── Tracking de análises PAGAS POR USER ──────────────────────────────────
+// Quando user paga 2 créditos por uma skin, grava em paid_analyses/{uid}__{skin}__{tier}.
+// Válido por 24h. Se o user refinar a mesma skin dentro da janela, NÃO cobra de novo.
+const PAID_TTL_MS = 24 * 60 * 60 * 1000;
+async function hasUserPaidRecently(uid, skinName, tier) {
+  try {
+    const db = admin.firestore();
+    const id = `${uid}__${skinName}__${tier}`;
+    const doc = await db.collection('paid_analyses').doc(id).get();
+    if (!doc.exists) return false;
+    const data = doc.data();
+    if (!data.paidAt) return false;
+    return Date.now() - new Date(data.paidAt).getTime() < PAID_TTL_MS;
+  } catch { return false; }
+}
+async function markUserPaid(uid, skinName, tier) {
+  try {
+    const db = admin.firestore();
+    const id = `${uid}__${skinName}__${tier}`;
+    await db.collection('paid_analyses').doc(id).set({
+      uid, skinName, tier, paidAt: new Date().toISOString(),
+    });
+  } catch (e) { console.log('[Analysis] paid mark error:', e.message); }
+}
+
 function scoreLabel(s) {
   if (s == null) return 'n/a';
   if (s >= 80) return 'Ótimo';
@@ -389,12 +414,20 @@ exports.handler = async (event) => {
   const steamBRL = steam?.lowest_price_brl || null;
 
   // ── Cobrar créditos AGORA (se tier pago) ──────────────────────────────
+  // Cobra APENAS se:
+  //   - tier tem custo > 0
+  //   - cache não existe OU existe mas unhealthy (vai regerar mesmo, mas sem cobrar)
+  //   - E o user AINDA não pagou por esta skin nas últimas 24h (evita cobrança
+  //     quando user adiciona refinement na mesma skin que já pagou)
   const cost = COSTS[tier];
-  if (cost > 0 && !cacheExistsButUnhealthy) {
+  const alreadyPaid = cost > 0 ? await hasUserPaidRecently(uid, name, tier) : false;
+  if (cost > 0 && !cacheExistsButUnhealthy && !alreadyPaid) {
     const result = await consume(uid, cost, `analysis:${tier}:${name}`, { skin: name, tier });
     if (!result.ok) {
       return json(402, { error: 'insufficient_credits', balance: result.balance, needed: cost, tier });
     }
+    // Marca que user pagou por esta skin — refinamentos na mesma skin não cobram de novo
+    await markUserPaid(uid, name, tier);
   }
 
   // ── Montar breakdown de preços em BRL ─────────────────────────────────
@@ -510,21 +543,18 @@ exports.handler = async (event) => {
   }
 
   // ── Pattern refinement (float tier, Doppler phase, Blue Gem) ──────────
-  // Roda se o cliente passou pelo menos um dos 3 params. Enriquece o response
-  // com info de posição no range do wear, phase de Doppler e tier de Blue Gem,
-  // além de um multiplicador de preço sugerido (factor) pra ajustar expectativa.
+  // Retorna classificação (tier do float, phase do Doppler, tier do Blue Gem)
+  // MAS SEM preço estimado multiplicado. Usuário vê a classificação e usa os
+  // preços REAIS do breakdown.brl (Buff, Youpin, etc) pra decidir.
+  // Preços reais de skins com pattern específico só podem ser obtidos via
+  // scraping live do marketplace — não é heurística.
   if (hasRefinement) {
     try {
       const { analyzePatternOverall } = require('./pattern-tiers');
       const pattern = analyzePatternOverall(name, { floatvalue, paintseed, paintindex });
       response.pattern = pattern;
-
-      // Preço base sugerido: usa o lowest do breakdown (ou Steam) como referência.
-      const baseBRL = response.score?.lowest ?? steamBRL ?? null;
-      if (baseBRL && pattern.combinedPriceFactor) {
-        response.pattern.adjustedPriceBRL = rd(baseBRL * pattern.combinedPriceFactor);
-        response.pattern.basePriceBRL = rd(baseBRL);
-      }
+      // NÃO incluir adjustedPriceBRL — frontend usa breakdown.brl (dados reais
+      // do mercado) e separadamente mostra o tier info pra informação.
     } catch (e) {
       console.log('[Analysis] pattern-tiers error:', e.message);
     }
