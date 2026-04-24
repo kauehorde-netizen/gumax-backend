@@ -323,11 +323,26 @@ exports.handler = async (event) => {
 
   if (event.httpMethod !== 'POST') return json(405, { error: 'POST only' });
 
-  // Admin only (sync store inventory)
-  const adminKey = event.headers?.['x-admin-key'] || event.headers?.['X-Admin-Key'];
-  if (!adminKey || adminKey !== process.env.ADMIN_API_KEY) {
-    return json(401, { error: 'admin key required' });
+  // Admin only — aceita Firebase ID token (Authorization: Bearer <token>) ou ADMIN_API_KEY (legacy).
+  const ADMIN_EMAILS = ['gumaxskins@gmail.com', 'cauehorde@gmail.com'];
+  const authHeader = event.headers?.authorization || event.headers?.Authorization || '';
+  const bearerToken = authHeader.replace(/^Bearer\s+/i, '').trim();
+  const legacyKey = event.headers?.['x-admin-key'] || event.headers?.['X-Admin-Key'];
+
+  let authorized = false;
+  if (bearerToken) {
+    try {
+      const decoded = await admin.auth().verifyIdToken(bearerToken);
+      if (ADMIN_EMAILS.includes((decoded.email || '').toLowerCase())) authorized = true;
+    } catch {
+      // não é Firebase token — cai pro fallback ADMIN_API_KEY
+      if (process.env.ADMIN_API_KEY && bearerToken === process.env.ADMIN_API_KEY) authorized = true;
+    }
   }
+  if (!authorized && legacyKey && process.env.ADMIN_API_KEY && legacyKey === process.env.ADMIN_API_KEY) {
+    authorized = true;
+  }
+  if (!authorized) return json(401, { error: 'Unauthorized — login como admin necessário' });
 
   let body = {};
   try { body = JSON.parse(event.body || '{}'); } catch {}
