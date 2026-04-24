@@ -591,8 +591,12 @@ function matchesCategory(name, type) {
   if (type === 'sticker') return /^Sticker\s*\|/.test(name) || /^Sealed\s+Graffiti/.test(name);
   if (type === 'charm')   return /^Charm\s*\|/.test(name);
   if (type === 'agent') {
+    // Weapons tem wear no final — "(Factory New)", etc. Agents NÃO tem wear.
+    if (/\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)$/.test(name)) return false;
+    // Agents terminam com " | <Grupo>". Usar endsWith pra evitar match em armas
+    // como "Galil AR | Phoenix Blacklight" (que contém "| Phoenix" mas não termina nele).
     for (const g of AGENT_GROUP_NAMES_BE) {
-      if (name.includes(' | ' + g)) return true;
+      if (name.endsWith(' | ' + g)) return true;
     }
     return false;
   }
@@ -622,6 +626,10 @@ async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY
   return top.map(x => {
     const steamCNY = extractPriceField(x.item.steam);
     const steamEstCNY = steamCNY > 0 ? steamCNY : x.youpin * 1.35;
+    // Icon fallback: Pricempire pode ter o icon em .icon, .image ou .image_url.
+    // Pra stickers/charms/agents muitas vezes o campo é vazio — frontend vai
+    // resolver via Steam Market /priceoverview usando o nome (fallback existente).
+    const iconRaw = x.item.icon || x.item.image || x.item.image_url || '';
     return {
       name: x.name,
       price_cny: x.youpin,
@@ -630,7 +638,7 @@ async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY
       saleBRL: applyPricing(x.youpin, saleFactor),
       rarity: x.item.rarity || 'Common',
       type: x.item.type || type,
-      iconUrl: buildIconUrl(x.item.icon),
+      iconUrl: buildIconUrl(iconRaw),
       source: 'pricempire_category',
     };
   });
