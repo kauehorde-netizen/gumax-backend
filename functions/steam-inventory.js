@@ -31,10 +31,18 @@ function json(code, body) {
   return { statusCode: code, headers: CORS, body: JSON.stringify(body) };
 }
 
+// Steam anda rejeitando requests sem UA de navegador real (return 400).
+// Usamos UA de Chrome + Referer + Accept headers completos pra simular um browser.
 function httpGetJson(url, { timeout = 15000 } = {}) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 Gumax-Backend/1.0', 'Accept': 'application/json' },
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8',
+        'Referer': 'https://steamcommunity.com/',
+        'Origin': 'https://steamcommunity.com',
+      },
       timeout,
     }, (res) => {
       let body = '';
@@ -42,7 +50,10 @@ function httpGetJson(url, { timeout = 15000 } = {}) {
       res.on('end', () => {
         if (res.statusCode === 403) return reject(Object.assign(new Error('inventory_private'), { status: 403 }));
         if (res.statusCode === 429) return reject(Object.assign(new Error('rate_limit'), { status: 429 }));
-        if (res.statusCode >= 400) return reject(Object.assign(new Error('http_' + res.statusCode), { status: res.statusCode }));
+        if (res.statusCode >= 400) {
+          return reject(Object.assign(new Error('http_' + res.statusCode),
+            { status: res.statusCode, bodySample: body.substring(0, 200) }));
+        }
         try { resolve(JSON.parse(body)); }
         catch { reject(new Error('bad_json')); }
       });
@@ -82,9 +93,10 @@ async function fetchPersona(steamId) {
   } catch { return null; }
 }
 
-// Busca inventário público de uma conta (CS2, app id 730, context 2)
+// Busca inventário público de uma conta (CS2, app id 730, context 2).
+// Steam reduziu limites recentemente — count=2000 é o máximo seguro.
 async function fetchInventory(steamId) {
-  const url = `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=5000`;
+  const url = `https://steamcommunity.com/inventory/${steamId}/730/2?l=english&count=2000`;
   return await httpGetJson(url, { timeout: 20000 });
 }
 
@@ -297,7 +309,15 @@ exports.handler = async (event) => {
       return json(200, { steamId, count: items.length, items });
     } catch (e) {
       const code = e.status === 403 ? 403 : (e.status === 429 ? 429 : 500);
-      return json(code, { error: e.message, steamId });
+      console.error(`[steam-inventory] ${steamId} ${e.message}`, e.bodySample || '');
+      return json(code, {
+        error: e.message,
+        steamId,
+        hint: e.status === 400
+          ? 'Steam rejeitou a request. Verifica se o inventário tá público (Steam → Perfil → Editar Perfil → Privacidade → Inventário: Público).'
+          : (e.status === 403 ? 'Inventário privado' : undefined),
+        debug: e.bodySample || undefined,
+      });
     }
   }
 
