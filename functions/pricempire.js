@@ -586,20 +586,52 @@ const AGENT_GROUP_NAMES_BE = [
   'FBI SWAT','Ground Rebel','Seal Team 6',
 ];
 
+// Classes de armas — grupos por tipo (não por modelo específico)
+const WEAPON_CLASSES_BE = {
+  rifle:   ['AK-47','M4A4','M4A1-S','AUG','SG 553','FAMAS','Galil AR','AWP','SSG 08','SCAR-20','G3SG1'],
+  pistol:  ['Desert Eagle','USP-S','Glock-18','P2000','P250','Five-SeveN','R8 Revolver','Dual Berettas','Tec-9','CZ75-Auto','Zeus x27'],
+  smg:     ['MAC-10','MP9','MP7','MP5-SD','UMP-45','P90','PP-Bizon'],
+  shotgun: ['Nova','XM1014','Sawed-Off','MAG-7'],
+  mg:      ['M249','Negev'],
+};
+const GLOVE_NAMES_BE = ['Sport Gloves','Driver Gloves','Specialist Gloves','Moto Gloves','Bloodhound Gloves','Hand Wraps','Hydra Gloves','Broken Fang Gloves'];
+
+function matchesWeaponClass(name, classKey) {
+  const prefixes = WEAPON_CLASSES_BE[classKey]; if (!prefixes) return false;
+  const bare = name.replace(/^StatTrak™\s*/, '').replace(/^Souvenir\s+/, '');
+  for (const p of prefixes) {
+    if (bare.startsWith(p + ' |')) return true;
+  }
+  return false;
+}
+function matchesGlovesBE(name) {
+  if (!name) return false;
+  for (const g of GLOVE_NAMES_BE) {
+    if (name.includes(g + ' |') || name.startsWith('★ ' + g + ' |')) return true;
+  }
+  return false;
+}
+function matchesKnifeBE(name) {
+  if (!name || !name.startsWith('★ ')) return false;
+  return !matchesGlovesBE(name);
+}
+
 function matchesCategory(name, type) {
   if (!name) return false;
   if (type === 'sticker') return /^Sticker\s*\|/.test(name) || /^Sealed\s+Graffiti/.test(name);
   if (type === 'charm')   return /^Charm\s*\|/.test(name);
   if (type === 'agent') {
-    // Weapons tem wear no final — "(Factory New)", etc. Agents NÃO tem wear.
+    // Agents NÃO têm wear. Weapons tem "(Factory New)" etc — exclui de cara.
     if (/\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)$/.test(name)) return false;
-    // Agents terminam com " | <Grupo>". Usar endsWith pra evitar match em armas
-    // como "Galil AR | Phoenix Blacklight" (que contém "| Phoenix" mas não termina nele).
     for (const g of AGENT_GROUP_NAMES_BE) {
       if (name.endsWith(' | ' + g)) return true;
     }
     return false;
   }
+  // Classes de armas: filtram por prefixo do modelo
+  if (type === 'knife')  return matchesKnifeBE(name);
+  if (type === 'gloves') return matchesGlovesBE(name);
+  if (WEAPON_CLASSES_BE[type]) return matchesWeaponClass(name, type);
   return false;
 }
 
@@ -650,11 +682,13 @@ const _originalHandler = exports.handler;
 exports.handler = async (event) => {
   const path = event.path || '';
   // GET /api/pricempire/by-category?type=agent&limit=80
+  // Types aceitos: sticker, charm, agent, rifle, pistol, smg, shotgun, mg, knife, gloves
   if (event.httpMethod === 'GET' && path.endsWith('/by-category')) {
     const q = event.queryStringParameters || {};
     const type = String(q.type || '').toLowerCase();
-    if (!['sticker', 'charm', 'agent'].includes(type)) {
-      return json(400, { error: 'type must be sticker, charm or agent' });
+    const ALLOWED = ['sticker','charm','agent','rifle','pistol','smg','shotgun','mg','knife','gloves'];
+    if (!ALLOWED.includes(type)) {
+      return json(400, { error: 'type must be one of: ' + ALLOWED.join(', ') });
     }
     const limit = Math.min(120, Math.max(1, parseInt(q.limit, 10) || 80));
     const items = await getItemsByCategory(type, limit);
