@@ -235,12 +235,75 @@ async function syncInventory(steamIds) {
   return { syncTime, accounts: results, pruned: prunedCount };
 }
 
+// Normaliza o inventário bruto da Steam em uma lista de items [{ market_hash_name, wear, rarity, type, iconUrl, assetid, tradable, marketable }].
+// Aplica filtro: só items marketable (skins, não items que não podem ser negociados).
+function normalizeInventoryItems(inventory) {
+  if (!inventory || !Array.isArray(inventory.assets) || !Array.isArray(inventory.descriptions)) {
+    return [];
+  }
+  const descByKey = {};
+  for (const d of inventory.descriptions) {
+    descByKey[`${d.classid}_${d.instanceid}`] = d;
+  }
+  const items = [];
+  for (const asset of inventory.assets) {
+    const key = `${asset.classid}_${asset.instanceid}`;
+    const desc = descByKey[key];
+    if (!desc) continue;
+    // Só items tradable e marketable
+    if (desc.tradable !== 1 && desc.tradable !== true) continue;
+    if (desc.marketable !== 1 && desc.marketable !== true) continue;
+
+    const marketHashName = desc.market_hash_name || desc.market_name || desc.name || '';
+    if (!marketHashName) continue;
+
+    items.push({
+      assetid: asset.assetid,
+      classid: asset.classid,
+      instanceid: asset.instanceid,
+      market_hash_name: marketHashName,
+      wear: extractWear(marketHashName),
+      wearFull: pickTag(desc.tags, 'Exterior') || '',
+      rarity: pickTag(desc.tags, 'Rarity') || 'Common',
+      type: pickTag(desc.tags, 'Type') || 'Weapon Skin',
+      iconUrl: desc.icon_url
+        ? `https://community.cloudflare.steamstatic.com/economy/image/${desc.icon_url}/256fx256f`
+        : '',
+      tradable: true,
+      marketable: true,
+    });
+  }
+  return items;
+}
+
 // ── Handler HTTP ──────────────────────────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
+
+  const path = event.path || '';
+
+  // GET /api/steam-inventory?steamId=76561... — público, leitura do inventário de qualquer
+  // user (desde que a conta esteja pública na Steam). Sem auth pra simplificar; rate limit
+  // protege contra abuso.
+  if (event.httpMethod === 'GET') {
+    const q = event.queryStringParameters || {};
+    const steamId = String(q.steamId || '').trim();
+    if (!/^\d{17}$/.test(steamId)) {
+      return json(400, { error: 'steamId precisa ser um SteamID64 (17 dígitos)' });
+    }
+    try {
+      const inv = await fetchInventory(steamId);
+      const items = normalizeInventoryItems(inv);
+      return json(200, { steamId, count: items.length, items });
+    } catch (e) {
+      const code = e.status === 403 ? 403 : (e.status === 429 ? 429 : 500);
+      return json(code, { error: e.message, steamId });
+    }
+  }
+
   if (event.httpMethod !== 'POST') return json(405, { error: 'POST only' });
 
-  // Admin only
+  // Admin only (sync store inventory)
   const adminKey = event.headers?.['x-admin-key'] || event.headers?.['X-Admin-Key'];
   if (!adminKey || adminKey !== process.env.ADMIN_API_KEY) {
     return json(401, { error: 'admin key required' });
