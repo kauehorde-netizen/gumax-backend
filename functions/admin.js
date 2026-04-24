@@ -358,6 +358,82 @@ exports.handler = async (event) => {
       }
     }
 
+    // ═══ BUYBACK — LIST TRANSACTIONS ═══
+    // Retorna todas as transações (ou filtradas por status).
+    if (action === 'buyback-list') {
+      const { status, limit = 50, type } = body;
+      let query = db.collection('transactions');
+      if (status) query = query.where('status', '==', status);
+      if (type) query = query.where('type', '==', type);
+      query = query.orderBy('createdAt', 'desc').limit(Math.min(200, limit));
+      const snapshot = await query.get();
+      const transactions = [];
+      snapshot.forEach(d => transactions.push({ id: d.id, ...d.data() }));
+      return {
+        statusCode: 200, headers: H,
+        body: JSON.stringify({ success: true, count: transactions.length, transactions }),
+      };
+    }
+
+    // ═══ BUYBACK — UPDATE TRANSACTION STATUS ═══
+    // body: { txId, status, note? }
+    // Status válidos:
+    //   WAITING_USER_TRADE    → aguardando user enviar trade
+    //   WAITING_USER_PIX      → aguardando user pagar PIX (upgrade)
+    //   TRADE_SENT            → Gu enviou trade pro user (upgrade/downgrade)
+    //   WAITING_TRADE_PROTECTION → skin chegou, contando 8 dias
+    //   READY_TO_SETTLE       → 8 dias passaram, pronto pra finalizar
+    //   COMPLETED             → tudo finalizado
+    //   CANCELED              → cancelado
+    //   BLOCKED               → bloqueado (suspeita de fraude)
+    if (action === 'buyback-update-status') {
+      const { txId, status, note } = body;
+      if (!txId || !status) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'txId e status obrigatórios' }) };
+      }
+      const VALID = [
+        'WAITING_USER_TRADE', 'WAITING_USER_PIX', 'TRADE_SENT',
+        'WAITING_TRADE_PROTECTION', 'READY_TO_SETTLE',
+        'COMPLETED', 'CANCELED', 'BLOCKED',
+      ];
+      if (!VALID.includes(status)) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'status inválido' }) };
+      }
+
+      const ref = db.collection('transactions').doc(txId);
+      const snap = await ref.get();
+      if (!snap.exists) {
+        return { statusCode: 404, headers: H, body: JSON.stringify({ error: 'transação não encontrada' }) };
+      }
+      const prev = snap.data();
+      const now = new Date().toISOString();
+      const patch = { status, updatedAt: now };
+
+      // Side-effects por status
+      if (status === 'WAITING_TRADE_PROTECTION') {
+        // Começa a contagem de 8 dias
+        patch.tradeAcceptedAt = now;
+        patch.tradeProtectionEndsAt = new Date(Date.now() + 8 * 24 * 60 * 60 * 1000).toISOString();
+      }
+      if (status === 'COMPLETED') {
+        if (prev.type === 'sell' || prev.type === 'downgrade') {
+          patch.pixOutSentAt = now;
+        }
+      }
+
+      // Append statusHistory
+      const history = Array.isArray(prev.statusHistory) ? prev.statusHistory : [];
+      history.push({ from: prev.status, to: status, at: now, by: 'admin', note: note || '' });
+      patch.statusHistory = history;
+
+      await ref.update(patch);
+      console.log(`[Admin Buyback] ${txId} ${prev.status} → ${status}`);
+      return {
+        statusCode: 200, headers: H,
+        body: JSON.stringify({ success: true, id: txId, ...prev, ...patch }),
+      };
+    }
+
     // ═══ GET ORDER STATS ═══
     if (action === 'stats') {
       // Get orders from last 30 days
