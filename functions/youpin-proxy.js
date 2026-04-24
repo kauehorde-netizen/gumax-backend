@@ -24,12 +24,16 @@ async function fetchYoupinTopSellers(limit = 50) {
   try {
     const { getTopSellers } = require('./pricempire');
     const top = await getTopSellers(limit);
-    // Compat payload: o frontend já espera price_cny, name, iconUrl, onSale
+    // Inclui saleBRL/originalBRL que o pricempire já calcula com a config de pricing.
+    // Frontend usa esses valores pra exibir preço final + strikethrough.
     const all = top.map(it => ({
       name: it.name,
       price_cny: it.price_cny,
-      onSale: it.platforms,        // usamos nº de plataformas como proxy de liquidez
-      total: it.platforms,
+      steam_price_cny: it.steam_price_cny,
+      originalBRL: it.originalBRL,
+      saleBRL: it.saleBRL,
+      onSale: it.onSale || it.platforms,
+      total: it.total || it.platforms,
       iconUrl: it.iconUrl,
       tradeable: true,
       rarity: it.rarity,
