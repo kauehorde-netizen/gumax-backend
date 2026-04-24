@@ -2,10 +2,45 @@
 // Manages inventory, margins, and orders
 // Requires ADMIN_API_KEY authentication
 
+// Lista de emails admins — espelha firestore.rules isAdmin()
+const ADMIN_EMAILS = ['gumaxskins@gmail.com', 'cauehorde@gmail.com'];
+
+// Verifica se o request é de admin.
+// Tenta 2 métodos na ordem:
+//   1) Firebase ID token (preferido) — frontend manda Authorization: Bearer <firebase-id-token>
+//      Se o token for válido E o email estiver em ADMIN_EMAILS, autoriza.
+//   2) ADMIN_API_KEY env var (fallback legacy) — se por algum motivo o Firebase não tá disponível.
+async function verifyAdminAuth(headers) {
+  const raw = headers.authorization || headers.Authorization || '';
+  const token = raw.replace(/^Bearer\s+/i, '').trim();
+  if (!token) return { ok: false, reason: 'no_auth_header' };
+
+  // Método 1: Firebase ID token
+  try {
+    const admin = require('firebase-admin');
+    const decoded = await admin.auth().verifyIdToken(token);
+    const email = (decoded.email || '').toLowerCase();
+    if (ADMIN_EMAILS.includes(email)) {
+      return { ok: true, via: 'firebase', uid: decoded.uid, email };
+    }
+    return { ok: false, reason: 'email_not_admin', email };
+  } catch (e) {
+    // Não é um Firebase token válido — tenta fallback ADMIN_API_KEY
+  }
+
+  // Método 2: ADMIN_API_KEY (legacy)
+  if (process.env.ADMIN_API_KEY && token === process.env.ADMIN_API_KEY) {
+    return { ok: true, via: 'api_key' };
+  }
+
+  return { ok: false, reason: 'invalid_token' };
+}
+
+// Wrapper síncrono legacy (não usar em código novo — mantém pra não quebrar testes antigos)
 function verifyAdminKey(headers) {
-  const authHeader = headers.authorization || '';
-  const token = authHeader.replace('Bearer ', '');
-  return token === process.env.ADMIN_API_KEY;
+  const authHeader = headers.authorization || headers.Authorization || '';
+  const token = authHeader.replace(/^Bearer\s+/i, '').trim();
+  return !!process.env.ADMIN_API_KEY && token === process.env.ADMIN_API_KEY;
 }
 
 function rd(val) {
@@ -37,9 +72,19 @@ exports.handler = async (event) => {
     return { statusCode: 405, headers: H, body: JSON.stringify({ error: 'POST only' }) };
   }
 
-  // Verify admin key
-  if (!verifyAdminKey(event.headers)) {
-    return { statusCode: 401, headers: H, body: JSON.stringify({ error: 'Unauthorized' }) };
+  // Verify admin auth (Firebase ID token preferido, ADMIN_API_KEY como fallback)
+  const authResult = await verifyAdminAuth(event.headers);
+  if (!authResult.ok) {
+    return {
+      statusCode: 401, headers: H,
+      body: JSON.stringify({
+        error: 'Unauthorized',
+        reason: authResult.reason,
+        hint: authResult.reason === 'email_not_admin'
+          ? `Email ${authResult.email || ''} não está na lista de admins.`
+          : 'Faça login como admin (gumaxskins@gmail.com ou cauehorde@gmail.com).',
+      }),
+    };
   }
 
   try {
