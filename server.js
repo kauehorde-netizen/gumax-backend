@@ -123,6 +123,7 @@ const creditsMod         = safeRequire('./functions/credits', 'credits');
 const analysisMod        = safeRequire('./functions/analysis', 'analysis');
 const subscriptionMod    = safeRequire('./functions/subscription', 'subscription');
 const creditsPurchaseMod = safeRequire('./functions/credits-purchase', 'credits-purchase');
+const buybackMod         = safeRequire('./functions/buyback', 'buyback');
 
 const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
 const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
@@ -137,6 +138,7 @@ const creditsHandler         = creditsMod?.handler     || disabledRoute('credits
 const analysisHandler        = analysisMod?.handler    || disabledRoute('analysis');
 const subscriptionHandler    = subscriptionMod?.handler || disabledRoute('subscription');
 const creditsPurchaseHandler = creditsPurchaseMod?.handler || disabledRoute('credits-purchase');
+const buybackHandler         = buybackMod?.handler     || disabledRoute('buyback');
 // Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
 // Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
 function safeRequire(path, label) {
@@ -238,6 +240,12 @@ app.get('/api/pricempire/items', rateLimit(60000, 20), wrapHandler(pricempireHan
 app.get('/api/pricempire/suggest', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/search', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+
+// Buyback (Vender/Upgrade/Downgrade)
+app.post('/api/buyback/quote', rateLimit(60000, 60), wrapHandler(buybackHandler));
+app.post('/api/buyback/create', rateLimit(60000, 10), wrapHandler(buybackHandler));
+app.get('/api/buyback/my', rateLimit(60000, 30), wrapHandler(buybackHandler));
+app.options('/api/buyback/*', (req, res) => res.sendStatus(204));
 app.options('/api/pricempire/*', (req, res) => res.sendStatus(204));
 
 // Aliases legados — redirecionam rotas /api/skinport/* pra pricempire pra não quebrar chamadas antigas
@@ -276,6 +284,8 @@ app.post('/api/admin/orders', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/update-order-status', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/get-pricing', rateLimit(60000, 30), wrapHandler(adminHandler));
 app.post('/api/admin/update-pricing', rateLimit(60000, 20), wrapHandler(adminHandler));
+app.post('/api/admin/buyback-list', rateLimit(60000, 60), wrapHandler(adminHandler));
+app.post('/api/admin/buyback-update-status', rateLimit(60000, 30), wrapHandler(adminHandler));
 app.options('/api/admin/*', (req, res) => res.sendStatus(204));
 
 // Image proxy: 100 per minute (used for displaying skins)
