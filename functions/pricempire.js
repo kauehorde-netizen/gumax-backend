@@ -318,6 +318,61 @@ async function suggestSkins(query, limit = 10) {
   return matches.slice(0, limit).map(m => m.name);
 }
 
+// Busca cards do catálogo completo (não só top-sellers).
+// Retorna itens com preços já aplicados (originalBRL, saleBRL, iconUrl) prontos pro frontend.
+// Usado pela home quando o user digita na busca — permite encontrar qualquer skin do Youpin.
+async function searchCatalog(query, limit = 40, minPriceCNY = 1, maxPriceCNY = 200000) {
+  const items = await fetchPricempireItems();
+  const q = normalizeName(query);
+  if (!q) return [];
+  const words = q.split(' ');
+
+  const candidates = [];
+  for (const [key, item] of Object.entries(items)) {
+    if (!isWeaponOrKnifeOrGloves(key)) continue;
+    const k = normalizeName(key);
+    if (!words.every(w => k.includes(w))) continue;
+    const youpin = getYoupinPrice(item);
+    if (youpin < minPriceCNY || youpin > maxPriceCNY) continue;
+    candidates.push({
+      name: key,
+      youpin,
+      platforms: ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'steam']
+        .filter(p => parseFloat(item[p]) > 0).length,
+      item,
+      score: Math.abs(k.length - q.length),
+    });
+  }
+
+  // Relevância: menor diferença de tamanho do nome tem prioridade
+  candidates.sort((a, b) => a.score - b.score || b.platforms - a.platforms);
+  const top = candidates.slice(0, limit);
+
+  // Aplica pricing config (igual no getTopSellers)
+  const { getConversionFactor, getBaseFactor, applyPricing } = require('./pricing');
+  const [saleFactor, baseFactor] = await Promise.all([
+    getConversionFactor(),
+    getBaseFactor(),
+  ]);
+
+  return top.map(x => {
+    const steamCNY = parseFloat(x.item.steam) || 0;
+    const steamEstCNY = steamCNY > 0 ? steamCNY : x.youpin * 1.35;
+    return {
+      name: x.name,
+      price_cny: x.youpin,
+      steam_price_cny: steamEstCNY,
+      originalBRL: applyPricing(steamEstCNY, baseFactor),
+      saleBRL: applyPricing(x.youpin, saleFactor),
+      rarity: x.item.rarity || 'Common',
+      type: x.item.type || inferTypeFromName(x.name),
+      iconUrl: buildIconUrl(x.item.icon),
+      platforms: x.platforms,
+      source: 'pricempire_search',
+    };
+  });
+}
+
 // Lista de armas do CS2. Usada pra filtrar o top-sellers — queremos mostrar só
 // armas, facas e luvas na home (mercado BR não investe em sticker/patch/music kit).
 const WEAPON_PREFIXES = [
@@ -472,6 +527,15 @@ exports.handler = async (event) => {
     return json(200, { query: q, count: suggestions.length, suggestions });
   }
 
+  // GET /api/pricempire/search?q=ak+redline&limit=40
+  // Busca no catálogo inteiro, retorna cards prontos com preços aplicados
+  if (event.httpMethod === 'GET' && path.endsWith('/search')) {
+    const q = (event.queryStringParameters || {}).q || '';
+    const limit = Math.min(80, Math.max(1, parseInt((event.queryStringParameters || {}).limit, 10) || 40));
+    const items = await searchCatalog(q, limit);
+    return json(200, { query: q, count: items.length, items });
+  }
+
   return json(405, { error: 'Method not allowed' });
 };
 
@@ -481,3 +545,4 @@ exports.getYoupinPrice = getYoupinPrice;
 exports.buildIconUrl = buildIconUrl;
 exports.suggestSkins = suggestSkins;
 exports.getTopSellers = getTopSellers;
+exports.searchCatalog = searchCatalog;
