@@ -276,6 +276,10 @@ app.post('/api/shield/process', rateLimit(60000, 5), async (req, res) => {
 app.post('/api/admin/sync-inventory', rateLimit(60000, 3), wrapHandler(steamInventoryHandler || disabledRoute('steam-inventory')));
 app.options('/api/admin/sync-inventory', (req, res) => res.sendStatus(204));
 
+// Leitura pública do inventário Steam (qualquer user pode ver próprio inventário pra vender)
+app.get('/api/steam-inventory', rateLimit(60000, 20), wrapHandler(steamInventoryHandler || disabledRoute('steam-inventory')));
+app.options('/api/steam-inventory', (req, res) => res.sendStatus(204));
+
 // Admin endpoints: 20 per minute (requires API key)
 app.post('/api/admin/update-margins', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/add-stock', rateLimit(60000, 20), wrapHandler(adminHandler));
