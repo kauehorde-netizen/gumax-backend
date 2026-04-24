@@ -243,9 +243,10 @@ app.get('/api/pricempire/suggest', rateLimit(60000, 60), wrapHandler(pricempireH
 app.get('/api/pricempire/search', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 
-// Float inspector (float exato + pattern via CSFloat)
+// Float inspector (float exato + pattern via SteamWebAPI.com)
 app.get('/api/inspect-float', rateLimit(60000, 60), wrapHandler(floatInspectorHandler));
 app.post('/api/inspect-float/batch', rateLimit(60000, 10), wrapHandler(floatInspectorHandler));
+app.post('/api/inspect-float/sync', rateLimit(60000, 5), wrapHandler(floatInspectorHandler));
 app.options('/api/inspect-float*', (req, res) => res.sendStatus(204));
 
 // Buyback (Vender/Upgrade/Downgrade)
