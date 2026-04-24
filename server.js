@@ -288,6 +288,8 @@ app.post('/api/admin/orders', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/update-order-status', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/get-pricing', rateLimit(60000, 30), wrapHandler(adminHandler));
 app.post('/api/admin/update-pricing', rateLimit(60000, 20), wrapHandler(adminHandler));
+app.post('/api/admin/get-stock-pricing', rateLimit(60000, 30), wrapHandler(adminHandler));
+app.post('/api/admin/update-stock-pricing', rateLimit(60000, 20), wrapHandler(adminHandler));
 app.post('/api/admin/buyback-list', rateLimit(60000, 60), wrapHandler(adminHandler));
 app.post('/api/admin/buyback-update-status', rateLimit(60000, 30), wrapHandler(adminHandler));
 app.options('/api/admin/*', (req, res) => res.sendStatus(204));
