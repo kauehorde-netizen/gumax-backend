@@ -571,10 +571,95 @@ exports.handler = async (event) => {
   return json(405, { error: 'Method not allowed' });
 };
 
+// ── Busca por CATEGORIA (sticker / charm / agent) ─────────────────────────
+// Categorias não têm "modelo" como armas — são todos itens únicos identificados
+// por padrão de nome. Retorna cards prontos igual searchCatalog.
+//
+//   sticker: nome começa com "Sticker |" ou "Sealed Graffiti"
+//   charm  : nome começa com "Charm |"
+//   agent  : nome termina com "| <GrupoConhecido>" (Elite Crew, FBI, SWAT, etc)
+const AGENT_GROUP_NAMES_BE = [
+  'Elite Crew','The Professionals','Professional','SWAT','NSWC SEAL','FBI','Phoenix',
+  'Sabre','Sabre Footsoldier','Sabre Footman','Balkan','Gendarmerie Nationale',
+  'Guerrilla Warfare','NZSAS','SAS','SEAL Frogmen','SEAL Frogman','TACP Cavalry',
+  'KSK','Spetsnaz','Nautilus','Brazilian 1st Battalion','FBI Sniper','FBI HRT',
+  'FBI SWAT','Ground Rebel','Seal Team 6',
+];
+
+function matchesCategory(name, type) {
+  if (!name) return false;
+  if (type === 'sticker') return /^Sticker\s*\|/.test(name) || /^Sealed\s+Graffiti/.test(name);
+  if (type === 'charm')   return /^Charm\s*\|/.test(name);
+  if (type === 'agent') {
+    for (const g of AGENT_GROUP_NAMES_BE) {
+      if (name.includes(' | ' + g)) return true;
+    }
+    return false;
+  }
+  return false;
+}
+
+async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY = 200000) {
+  const items = await fetchPricempireItems();
+  const matches = [];
+  for (const [name, item] of Object.entries(items)) {
+    if (!matchesCategory(name, type)) continue;
+    const youpin = getYoupinPrice(item);
+    if (youpin < minPriceCNY || youpin > maxPriceCNY) continue;
+    matches.push({ name, youpin, item });
+  }
+  // Ordena pelo mais vendido (proxy: preço youpin desc pra começar com os mais populares)
+  matches.sort((a, b) => b.youpin - a.youpin);
+  const top = matches.slice(0, limit);
+
+  // Aplica pricing pra converter CNY → BRL
+  const { getConversionFactor, getBaseFactor, applyPricing } = require('./pricing');
+  const [saleFactor, baseFactor] = await Promise.all([
+    getConversionFactor(),
+    getBaseFactor(),
+  ]);
+
+  return top.map(x => {
+    const steamCNY = extractPriceField(x.item.steam);
+    const steamEstCNY = steamCNY > 0 ? steamCNY : x.youpin * 1.35;
+    return {
+      name: x.name,
+      price_cny: x.youpin,
+      steam_price_cny: steamEstCNY,
+      originalBRL: applyPricing(steamEstCNY, baseFactor),
+      saleBRL: applyPricing(x.youpin, saleFactor),
+      rarity: x.item.rarity || 'Common',
+      type: x.item.type || type,
+      iconUrl: buildIconUrl(x.item.icon),
+      source: 'pricempire_category',
+    };
+  });
+}
+
+// Estende o handler HTTP com a rota /by-category
+// (deixa o handler existente intacto — esta rota é checada primeiro)
+const _originalHandler = exports.handler;
+exports.handler = async (event) => {
+  const path = event.path || '';
+  // GET /api/pricempire/by-category?type=agent&limit=80
+  if (event.httpMethod === 'GET' && path.endsWith('/by-category')) {
+    const q = event.queryStringParameters || {};
+    const type = String(q.type || '').toLowerCase();
+    if (!['sticker', 'charm', 'agent'].includes(type)) {
+      return json(400, { error: 'type must be sticker, charm or agent' });
+    }
+    const limit = Math.min(120, Math.max(1, parseInt(q.limit, 10) || 80));
+    const items = await getItemsByCategory(type, limit);
+    return json(200, { type, count: items.length, items });
+  }
+  return _originalHandler(event);
+};
+
 exports.fetchPricempireItems = fetchPricempireItems;
 exports.getPricempireItem = getPricempireItem;
 exports.getYoupinPrice = getYoupinPrice;
 exports.buildIconUrl = buildIconUrl;
 exports.suggestSkins = suggestSkins;
 exports.getTopSellers = getTopSellers;
+exports.getItemsByCategory = getItemsByCategory;
 exports.searchCatalog = searchCatalog;
