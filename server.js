@@ -124,6 +124,7 @@ const analysisMod        = safeRequire('./functions/analysis', 'analysis');
 const subscriptionMod    = safeRequire('./functions/subscription', 'subscription');
 const creditsPurchaseMod = safeRequire('./functions/credits-purchase', 'credits-purchase');
 const buybackMod         = safeRequire('./functions/buyback', 'buyback');
+const floatInspectorMod  = safeRequire('./functions/float-inspector', 'float-inspector');
 
 const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
 const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
@@ -139,6 +140,7 @@ const analysisHandler        = analysisMod?.handler    || disabledRoute('analysi
 const subscriptionHandler    = subscriptionMod?.handler || disabledRoute('subscription');
 const creditsPurchaseHandler = creditsPurchaseMod?.handler || disabledRoute('credits-purchase');
 const buybackHandler         = buybackMod?.handler     || disabledRoute('buyback');
+const floatInspectorHandler  = floatInspectorMod?.handler || disabledRoute('float-inspector');
 // Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
 // Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
 function safeRequire(path, label) {
@@ -240,6 +242,11 @@ app.get('/api/pricempire/items', rateLimit(60000, 20), wrapHandler(pricempireHan
 app.get('/api/pricempire/suggest', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/search', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+
+// Float inspector (float exato + pattern via CSFloat)
+app.get('/api/inspect-float', rateLimit(60000, 60), wrapHandler(floatInspectorHandler));
+app.post('/api/inspect-float/batch', rateLimit(60000, 10), wrapHandler(floatInspectorHandler));
+app.options('/api/inspect-float*', (req, res) => res.sendStatus(204));
 
 // Buyback (Vender/Upgrade/Downgrade)
 app.post('/api/buyback/quote', rateLimit(60000, 60), wrapHandler(buybackHandler));
