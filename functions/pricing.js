@@ -121,6 +121,76 @@ function applyPricing(cny, factor) {
   return Math.round(cny * factor * 100) / 100;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// STOCK PRICING (skins do Gu — estoque próprio, Entrega Full).
+// Mesma schema, doc separado em settings/stockPricing. Permite que o Gu
+// tenha margens diferentes pro estoque dele vs top-sellers do Youpin.
+// ═══════════════════════════════════════════════════════════════════
+const STOCK_DEFAULTS = Object.freeze({
+  mode: 'surcharge',
+  surchargeBRL: 0.10,   // Gu costuma vender o estoque próprio mais caro (entrega em 30min)
+  marginPct: 15,
+  fallbackRate: 0.74,
+});
+
+let stockConfigCache = { data: null, ts: 0 };
+
+async function getStockPricingConfig(forceRefresh = false) {
+  if (!forceRefresh && stockConfigCache.data && Date.now() - stockConfigCache.ts < CONFIG_TTL) {
+    return stockConfigCache.data;
+  }
+  try {
+    const admin = require('firebase-admin');
+    const db = admin.firestore();
+    const doc = await db.collection('settings').doc('stockPricing').get();
+    const raw = doc.exists ? doc.data() : {};
+    const data = { ...STOCK_DEFAULTS, ...raw };
+    if (!['surcharge', 'percent'].includes(data.mode)) data.mode = STOCK_DEFAULTS.mode;
+    const sc = parseFloat(data.surchargeBRL);
+    data.surchargeBRL = (sc >= 0 && sc < 2) ? sc : STOCK_DEFAULTS.surchargeBRL;
+    const mg = parseFloat(data.marginPct);
+    data.marginPct = (mg >= 0 && mg < 100) ? mg : STOCK_DEFAULTS.marginPct;
+    const fb = parseFloat(data.fallbackRate);
+    data.fallbackRate = (fb > 0 && fb < 5) ? fb : STOCK_DEFAULTS.fallbackRate;
+    stockConfigCache = { data, ts: Date.now() };
+    return data;
+  } catch (e) {
+    console.error('[Stock Pricing] error:', e.message);
+    return { ...STOCK_DEFAULTS };
+  }
+}
+
+async function setStockPricingConfig({ mode, surchargeBRL, marginPct }, updatedBy = 'admin') {
+  const admin = require('firebase-admin');
+  const db = admin.firestore();
+  const patch = { updatedAt: new Date().toISOString(), updatedBy };
+  if (mode !== undefined) {
+    if (!['surcharge', 'percent'].includes(mode)) throw new Error('mode must be "surcharge" or "percent"');
+    patch.mode = mode;
+  }
+  if (surchargeBRL !== undefined) {
+    const sc = parseFloat(surchargeBRL);
+    if (!(sc >= 0 && sc < 2)) throw new Error('surchargeBRL must be between 0 and 2');
+    patch.surchargeBRL = sc;
+  }
+  if (marginPct !== undefined) {
+    const mg = parseFloat(marginPct);
+    if (!(mg >= 0 && mg < 100)) throw new Error('marginPct must be between 0 and 99');
+    patch.marginPct = mg;
+  }
+  await db.collection('settings').doc('stockPricing').set(patch, { merge: true });
+  stockConfigCache = { data: null, ts: 0 };
+  return getStockPricingConfig(true);
+}
+
+// Retorna o fator final de venda pro estoque (mesma lógica do Youpin, config diferente)
+async function getStockConversionFactor() {
+  const cfg = await getStockPricingConfig();
+  const baseRate = await getBaseFactor();
+  if (cfg.mode === 'percent') return baseRate * (1 + (cfg.marginPct || 0) / 100);
+  return baseRate + (cfg.surchargeBRL || 0);
+}
+
 exports.getPricingConfig = getPricingConfig;
 exports.setPricingConfig = setPricingConfig;
 exports.getConversionFactor = getConversionFactor;
@@ -129,3 +199,7 @@ exports.salePriceBRL = salePriceBRL;
 exports.originalPriceBRL = originalPriceBRL;
 exports.applyPricing = applyPricing;
 exports.DEFAULTS = DEFAULTS;
+exports.getStockPricingConfig = getStockPricingConfig;
+exports.setStockPricingConfig = setStockPricingConfig;
+exports.getStockConversionFactor = getStockConversionFactor;
+exports.STOCK_DEFAULTS = STOCK_DEFAULTS;
