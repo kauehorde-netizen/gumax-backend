@@ -42,11 +42,23 @@ async function quoteItem(marketHashName) {
   const item = await getItemPrices(marketHashName);
   if (!item) return null;
 
-  const { getBaseFactor, buildIconUrl } = require('./pricempire') /* fallback */;
+  const { buildIconUrl } = require('./pricempire');
   const { getBaseFactor: getBaseFactorPricing } = require('./pricing');
 
-  const youpinCNY = parseFloat(item.youpin) || 0;
-  const buffCNY   = parseFloat(item.buff) || 0;
+  // Helper defensivo — aceita número ou objeto {price, count}
+  const extractPrice = (v) => {
+    if (v == null) return 0;
+    if (typeof v === 'number') return v > 0 ? v : 0;
+    if (typeof v === 'string') { const n = parseFloat(v); return n > 0 ? n : 0; }
+    if (typeof v === 'object' && v.price != null) {
+      const n = parseFloat(v.price);
+      return n > 0 ? n / 100 : 0;
+    }
+    return 0;
+  };
+
+  const youpinCNY = extractPrice(item.youpin);
+  const buffCNY   = extractPrice(item.buff);
 
   // Menor preço entre Youpin e Buff (se um for 0, usa o outro)
   const available = [youpinCNY, buffCNY].filter(p => p > 0);
@@ -110,11 +122,12 @@ async function createTransaction(payload, auth) {
   if (target && target.length) {
     // Pro target usamos o preço DE VENDA da loja (getConversionFactor + pricing config)
     const { getConversionFactor, applyPricing } = require('./pricing');
+    const { getYoupinPrice } = require('./pricempire');
     const saleFactor = await getConversionFactor();
     for (const t of target) {
       const it = await getItemPrices(t.name);
       if (!it) throw new Error(`target não encontrado: ${t.name}`);
-      const youpinCNY = parseFloat(it.youpin) || 0;
+      const youpinCNY = getYoupinPrice(it);
       const saleBRL = applyPricing(youpinCNY, saleFactor);
       targetDetails.push({
         name: it.market_hash_name || t.name,
