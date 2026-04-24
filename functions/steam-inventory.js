@@ -142,7 +142,6 @@ async function syncSingleAccount(steamId, pricempireIndex, cnyRate, syncTime, st
     const key = `${asset.classid}_${asset.instanceid}`;
     const desc = descByKey[key];
     if (!desc) continue;
-    // Só marketable (skins, não coupon/tag etc)
     if (desc.marketable !== 1 && desc.marketable !== true) continue;
 
     const marketHashName = desc.market_hash_name || desc.market_name || desc.name || '';
@@ -152,6 +151,20 @@ async function syncSingleAccount(steamId, pricempireIndex, cnyRate, syncTime, st
     const rarity = pickTag(desc.tags, 'Rarity');
     const exterior = pickTag(desc.tags, 'Exterior');
     const wearCode = extractWear(marketHashName);
+
+    // SKIP: stickers, cases, graffiti, patches, music kits, agents, pins, pass etc.
+    // Só queremos skins de armas (Weapon), facas (Knife) e luvas (Gloves).
+    const lowerName = marketHashName.toLowerCase();
+    const isWeaponOrKnife =
+      marketHashName.startsWith('★') ||   // facas/luvas
+      /^StatTrak™\s/.test(marketHashName) || // StatTrak (qualquer arma)
+      /^[A-Z]+[\w\- ]*\s\|/.test(marketHashName); // "AK-47 | ...", "Desert Eagle | ..."
+    const isBlockedCategory =
+      /^(Sticker|Patch|Graffiti|Music Kit|Sealed Graffiti|Case|Operation|Souvenir Package|Pin|Pass|Coupon|Key)/i.test(marketHashName) ||
+      /^(Dreams & Nightmares|Fracture|Operation Riptide|Operation Breakout|Chroma|Huntsman|Prisma|Shattered|Recoil|Snakebite|Horizon|Clutch|Spectrum|Gamma|Glove|Hydra|Winter Offensive|eSports) Case/i.test(marketHashName) ||
+      /Case$/i.test(marketHashName) ||
+      /Capsule$/i.test(marketHashName);
+    if (!isWeaponOrKnife || isBlockedCategory) continue;
 
     // Preço via Pricempire (base: Youpin CNY)
     const pricempireItem = pricempireIndex[marketHashName];
