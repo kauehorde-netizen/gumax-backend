@@ -323,9 +323,11 @@ setInterval(async () => {
   } catch (e) { console.error('[Subscription cron]', e.message); }
 }, 6 * 60 * 60 * 1000); // 6h
 
-// Pricempire: pré-carrega e persiste catálogo no Firestore 1x por dia.
-// Evita que o primeiro usuário do dia tenha que esperar 5-10s pela Pricempire.
-// Também aquece o cache no boot — antes de qualquer user chegar.
+// Pricempire: pré-carrega e persiste catálogo + top-sellers do dia.
+// Roda:
+//   - 30s depois do boot (aquece cache logo que o server sobe)
+//   - Todo dia às 05:00 BRT (catálogo fresco pro primeiro usuário da manhã)
+//   - Fallback a cada 12h (pra garantir que o pior caso é 12h stale)
 function schedulePricempirePrewarm() {
   const prewarm = async () => {
     try {
@@ -334,11 +336,41 @@ function schedulePricempirePrewarm() {
       const start = Date.now();
       const items = await mod.fetchPricempireItems();
       console.log(`[Pricempire prewarm] ${Object.keys(items).length} items in ${Date.now() - start}ms`);
+      // Pre-aquece também o top-sellers (chamada mais comum da home)
+      if (mod.getTopSellers) {
+        const topStart = Date.now();
+        const top = await mod.getTopSellers(50).catch(() => []);
+        console.log(`[Pricempire prewarm] top-sellers ${top.length} items in ${Date.now() - topStart}ms`);
+      }
     } catch (e) { console.error('[Pricempire prewarm]', e.message); }
   };
-  // Primeiro prewarm 30s depois do boot (dá tempo da Firebase inicializar)
+
+  // Calcula quantos ms faltam até a próxima 05:00 BRT (America/Sao_Paulo = UTC-3)
+  function msUntilNext5amBRT() {
+    const now = new Date();
+    // BRT = UTC-3
+    const nowBRT = new Date(now.getTime() - 3 * 60 * 60 * 1000);
+    const target = new Date(nowBRT);
+    target.setUTCHours(5, 0, 0, 0);
+    if (target.getTime() <= nowBRT.getTime()) {
+      // Já passou hoje, agenda pra amanhã
+      target.setUTCDate(target.getUTCDate() + 1);
+    }
+    return target.getTime() - nowBRT.getTime();
+  }
+
+  // Prewarm imediato (30s após boot)
   setTimeout(prewarm, 30 * 1000);
-  // Depois a cada 12h (garante que no pior caso o cache tá <12h stale)
+
+  // Agenda o primeiro prewarm das 05:00 BRT e depois a cada 24h
+  const msUntil5am = msUntilNext5amBRT();
+  console.log(`[Pricempire prewarm] próximo às 05:00 BRT em ${Math.round(msUntil5am / 60000)} min`);
+  setTimeout(() => {
+    prewarm();
+    setInterval(prewarm, 24 * 60 * 60 * 1000);
+  }, msUntil5am);
+
+  // Fallback a cada 12h (caso algum ciclo falhe)
   setInterval(prewarm, 12 * 60 * 60 * 1000);
 }
 schedulePricempirePrewarm();
