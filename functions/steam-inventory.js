@@ -115,7 +115,11 @@ async function fetchCnyBrl() {
 }
 
 // ── Sync core ─────────────────────────────────────────────────────────────
-async function syncSingleAccount(steamId, pricempireIndex, cnyRate) {
+// IMPORTANTE: syncTime é passado do caller pra que TODOS os items sincronizados
+// na mesma operação tenham o MESMO lastSyncAt. Assim a prune (que remove o que
+// não foi sincronizado agora) não remove por engano os items que acabaram de sincronizar.
+// stockFactor é o fator BRL/CNY de VENDA pro estoque (google_rate + surcharge ou × %).
+async function syncSingleAccount(steamId, pricempireIndex, cnyRate, syncTime, stockFactor) {
   const [inventory, persona] = await Promise.all([
     fetchInventory(steamId),
     fetchPersona(steamId),
@@ -171,9 +175,14 @@ async function syncSingleAccount(steamId, pricempireIndex, cnyRate) {
       delivery: 'full',
       inStock: true,
       active: true,
-      lastSyncAt: new Date().toISOString(),
+      lastSyncAt: syncTime,
       buyPriceCNY: buyPriceCNY > 0 ? buyPriceCNY : null,
       buyPriceBRL: buyPriceCNY > 0 ? +(buyPriceCNY * cnyRate).toFixed(2) : null,
+      // sellPriceBRL: preço de VENDA na loja, usando config settings/stockPricing
+      // (google_rate + surcharge OU google_rate × (1 + margin/100)).
+      sellPriceBRL: buyPriceCNY > 0 && stockFactor > 0
+        ? +(buyPriceCNY * stockFactor).toFixed(2)
+        : null,
       source: 'steam_inventory',
     };
     batch.set(db.collection('stock').doc(docId), stockDoc, { merge: true });
@@ -215,16 +224,21 @@ async function syncInventory(steamIds) {
   const ids = steamIds.map(s => String(s).trim()).filter(s => /^\d{17}$/.test(s));
   if (ids.length === 0) throw new Error('no valid steamIds (expected 17-digit SteamID64)');
 
-  const [pricempireIndex, cnyRate] = await Promise.all([
+  // Fator de venda do estoque (google_rate + surcharge OU × margin%)
+  // vindo de settings/stockPricing.
+  const { getStockConversionFactor } = require('./pricing');
+  const [pricempireIndex, cnyRate, stockFactor] = await Promise.all([
     fetchPricempireItems(),
     fetchCnyBrl(),
+    getStockConversionFactor().catch(() => 0.85), // fallback seguro
   ]);
+  console.log(`[steam-inventory] stockFactor=${stockFactor}`);
 
   const results = [];
   const syncTime = new Date().toISOString();
   for (const sid of ids) {
     try {
-      const r = await syncSingleAccount(sid, pricempireIndex, cnyRate);
+      const r = await syncSingleAccount(sid, pricempireIndex, cnyRate, syncTime, stockFactor);
       r.lastSyncAt = syncTime;
       results.push(r);
     } catch (e) {
