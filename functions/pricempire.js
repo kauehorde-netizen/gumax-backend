@@ -65,7 +65,8 @@ function normalizeV4Item(marketHashName, priceMap) {
 // Cache no Firestore — persiste entre restarts do Railway e compartilhado entre instâncias
 const FIRESTORE_CACHE_DOC = { col: 'cached_prices', id: 'pricempire_top_sellers' };
 // Schema version — incrementa quando mudar estrutura de dados pra invalidar cache antigo
-const CACHE_SCHEMA_VERSION = 3; // v3: inclui {src}_count de listings (pra ranking por volume)
+// v4: force reload pra corrigir items que tinham buff:{object} em vez de buff:número (bug v3 fallback)
+const CACHE_SCHEMA_VERSION = 4;
 // Como o payload é grande (~25k items), salvamos chunks em subcolection
 async function loadFromFirestoreCache() {
   try {
@@ -277,17 +278,44 @@ async function getPricempireItem(name) {
   return { ...candidates[0].item, market_hash_name: candidates[0].key, matchedAs: 'fuzzy' };
 }
 
+// Helper defensivo: extrai um preço do campo, seja ele:
+//   - número (formato normalizado)            → retorna como está
+//   - objeto { price: X, ... }                  → retorna X / 100 (X em centavos)
+//   - string                                    → parse
+function extractPriceField(val) {
+  if (val == null) return 0;
+  if (typeof val === 'number') return val > 0 ? val : 0;
+  if (typeof val === 'string') {
+    const n = parseFloat(val);
+    return n > 0 ? n : 0;
+  }
+  if (typeof val === 'object' && val.price != null) {
+    const n = parseFloat(val.price);
+    return n > 0 ? n / 100 : 0;
+  }
+  return 0;
+}
+
+function extractCountField(val) {
+  if (val == null) return 0;
+  if (typeof val === 'number') return val > 0 ? val : 0;
+  if (typeof val === 'object' && val.count != null) {
+    const n = parseFloat(val.count);
+    return n > 0 ? n : 0;
+  }
+  return parseFloat(val) || 0;
+}
+
 // Helper: extrai o preço de Youpin (base) em CNY, com fallback pra outras fontes
 function getYoupinPrice(item) {
   if (!item) return 0;
-  const youpin = parseFloat(item.youpin) || 0;
+  const youpin = extractPriceField(item.youpin);
   if (youpin > 0) return youpin;
-  // Fallbacks na ordem: buff (bem correlacionado com Youpin), c5game, csfloat
-  const buff = parseFloat(item.buff) || 0;
+  const buff = extractPriceField(item.buff);
   if (buff > 0) return buff;
-  const c5 = parseFloat(item.c5game) || 0;
+  const c5 = extractPriceField(item.c5game);
   if (c5 > 0) return c5;
-  const csfloat = parseFloat(item.csfloat) || 0;
+  const csfloat = extractPriceField(item.csfloat);
   if (csfloat > 0) return csfloat;
   return 0;
 }
@@ -338,7 +366,7 @@ async function searchCatalog(query, limit = 40, minPriceCNY = 1, maxPriceCNY = 2
       name: key,
       youpin,
       platforms: ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'steam']
-        .filter(p => parseFloat(item[p]) > 0).length,
+        .filter(p => extractPriceField(item[p]) > 0).length,
       item,
       score: Math.abs(k.length - q.length),
     });
@@ -356,7 +384,7 @@ async function searchCatalog(query, limit = 40, minPriceCNY = 1, maxPriceCNY = 2
   ]);
 
   return top.map(x => {
-    const steamCNY = parseFloat(x.item.steam) || 0;
+    const steamCNY = extractPriceField(x.item.steam);
     const steamEstCNY = steamCNY > 0 ? steamCNY : x.youpin * 1.35;
     return {
       name: x.name,
@@ -413,10 +441,12 @@ async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
   const all = Object.entries(items)
     .filter(([name]) => isWeaponOrKnifeOrGloves(name))
     .map(([name, it]) => {
-      const youpinCount = parseFloat(it.youpin_count) || 0;
-      const buffCount = parseFloat(it.buff_count) || 0;
+      // Counts: podem vir como {src}_count OU embutidos em {src: {count}}
+      const youpinCount = extractCountField(it.youpin_count) || extractCountField(it.youpin);
+      const buffCount   = extractCountField(it.buff_count)   || extractCountField(it.buff);
+      // Platforms: conta quantas fontes têm preço válido (usa extractPriceField — aceita número ou objeto)
       const platforms = ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'steam']
-        .filter(p => parseFloat(it[p]) > 0).length;
+        .filter(p => extractPriceField(it[p]) > 0).length;
       return {
         name,
         youpin: getYoupinPrice(it),
@@ -470,7 +500,7 @@ async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
   ]);
 
   return top.map(x => {
-    const steamCNY = parseFloat(x.item.steam) || 0;
+    const steamCNY = extractPriceField(x.item.steam);
     // Se não tem Steam price, extrapola a partir do Youpin (Steam costuma ser +~35% sobre Youpin)
     const steamEstCNY = steamCNY > 0 ? steamCNY : x.youpin * 1.35;
     return {
