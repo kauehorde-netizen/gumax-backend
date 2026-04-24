@@ -403,6 +403,50 @@ exports.handler = async (event) => {
       }
     }
 
+    // ═══ GET STOCK PRICING CONFIG ═══
+    if (action === 'get-stock-pricing') {
+      const { getStockPricingConfig, getStockConversionFactor } = require('./pricing');
+      const { fetchExchangeRate } = require('./exchange-rate');
+      const [cfg, googleRate] = await Promise.all([
+        getStockPricingConfig(true),
+        fetchExchangeRate().catch(() => 0),
+      ]);
+      const baseRate = googleRate > 0 ? googleRate : cfg.fallbackRate;
+      const saleFactor = cfg.mode === 'percent'
+        ? baseRate * (1 + (cfg.marginPct || 0) / 100)
+        : baseRate + (cfg.surchargeBRL || 0);
+      return {
+        statusCode: 200, headers: H,
+        body: JSON.stringify({
+          success: true,
+          config: cfg,
+          currentFactor: saleFactor,
+          googleRate,
+          preview: {
+            youpinCNY: 100,
+            originalBRL: Math.round(100 * baseRate * 100) / 100,
+            saleBRL: Math.round(100 * saleFactor * 100) / 100,
+          },
+        }),
+      };
+    }
+
+    // ═══ UPDATE STOCK PRICING CONFIG ═══
+    if (action === 'update-stock-pricing') {
+      const { setStockPricingConfig } = require('./pricing');
+      const { mode, surchargeBRL, marginPct } = body;
+      try {
+        const cfg = await setStockPricingConfig({ mode, surchargeBRL, marginPct }, 'admin');
+        console.log('[Admin] Updated stock pricing:', cfg);
+        return {
+          statusCode: 200, headers: H,
+          body: JSON.stringify({ success: true, config: cfg }),
+        };
+      } catch (e) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: e.message }) };
+      }
+    }
+
     // ═══ BUYBACK — LIST TRANSACTIONS ═══
     // Retorna todas as transações (ou filtradas por status).
     if (action === 'buyback-list') {
