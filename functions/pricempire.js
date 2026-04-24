@@ -417,14 +417,16 @@ const WEAPON_PREFIXES = [
   'CZ75-Auto', 'Desert Eagle', 'Dual Berettas', 'R8 Revolver', 'Zeus x27',
 ];
 
-// Retorna true se o nome é de uma arma, faca ou luva (★ prefix)
+// Retorna true se o nome é de uma arma, faca ou luva.
+// Aceita prefixos ★ (facas/luvas) e StatTrak™ (variantes com contador de kills).
 function isWeaponOrKnifeOrGloves(name) {
   if (!name) return false;
-  // Facas e luvas: começam com ★
+  // Facas e luvas sempre começam com ★ (também StatTrak de facas: "★ StatTrak™ Karambit...")
   if (name.startsWith('★')) return true;
-  // Armas: começam com o nome da arma seguido de espaço + |
+  // Remove prefixo "StatTrak™ " pra checar a arma por baixo
+  const bare = name.replace(/^StatTrak™\s*/, '').trim();
   for (const prefix of WEAPON_PREFIXES) {
-    if (name.startsWith(prefix + ' |')) return true;
+    if (bare.startsWith(prefix + ' |')) return true;
   }
   return false;
 }
