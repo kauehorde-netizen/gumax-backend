@@ -296,9 +296,24 @@ async function syncInventory(steamIds) {
     }, { merge: true });
   } catch {}
 
-  // Float enrichment removido — CSFloat API não disponível do Railway (ENOTFOUND).
-  // Inspect link é capturado e salvo; frontend mostra botão "Ver no Steam" pro cliente
-  // abrir o visualizador 3D da Steam (que mostra float + pattern reais).
+  // Float enrichment via SteamWebAPI.com — mesma API usada pelo FlowSkins.
+  // Roda em background (fire-and-forget) pra não atrasar a resposta da sync.
+  // Pega floatvalue + paintseed + paintindex em bulk por steamId (1 chamada = tudo).
+  setImmediate(async () => {
+    try {
+      const floatMod = require('./float-inspector');
+      if (floatMod.enrichStockWithFloats) {
+        const successfulIds = results.filter(r => r.count > 0).map(r => r.steamId);
+        if (successfulIds.length > 0) {
+          console.log('[steam-inventory] iniciando float enrichment em background...');
+          const enrichResult = await floatMod.enrichStockWithFloats(successfulIds);
+          console.log('[steam-inventory] float enrichment result:', enrichResult);
+        }
+      }
+    } catch (e) {
+      console.error('[steam-inventory] float enrichment error:', e.message);
+    }
+  });
 
   return { syncTime, accounts: results, pruned: prunedCount };
 }
