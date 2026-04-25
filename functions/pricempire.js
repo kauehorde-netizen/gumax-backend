@@ -621,14 +621,20 @@ function matchesCategory(name, type) {
   if (type === 'sticker') return /^Sticker\s*\|/.test(name) || /^Sealed\s+Graffiti/.test(name);
   if (type === 'charm')   return /^Charm\s*\|/.test(name);
   if (type === 'agent') {
-    // Agents NÃO têm wear. Weapons tem "(Factory New)" etc — exclui de cara.
     if (/\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)$/.test(name)) return false;
     for (const g of AGENT_GROUP_NAMES_BE) {
       if (name.endsWith(' | ' + g)) return true;
     }
     return false;
   }
-  // Classes de armas: filtram por prefixo do modelo
+  // Pra weapons/knives/gloves: SEMPRE exige wear suffix no final.
+  // Sem isso, items como "★ Karambit" ou "★ StatTrak™ Karambit" (entries
+  // abstratas do Pricempire) entrariam mas não existem no Steam Market real
+  // → fotos quebradas. Items legítimos sempre têm "(Factory New)" etc.
+  const hasWear = /\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)$/.test(name);
+  if (!hasWear) return false;
+  // Tem que ter "|" (skin name) — items vanilla "★ Karambit (...)" sem skin não interessam
+  if (!name.includes(' | ')) return false;
   if (type === 'knife')  return matchesKnifeBE(name);
   if (type === 'gloves') return matchesGlovesBE(name);
   if (WEAPON_CLASSES_BE[type]) return matchesWeaponClass(name, type);
