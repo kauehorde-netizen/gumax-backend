@@ -354,10 +354,21 @@ async function searchCatalog(query, limit = 40, minPriceCNY = 1, maxPriceCNY = 2
   const q = normalizeName(query);
   if (!q) return [];
   const words = q.split(' ');
+  // Se a query EXPLICITAMENTE pede StatTrak/Souvenir, permite. Senão filtra.
+  const wantsStatTrak = /stattrak/i.test(query);
+  const wantsSouvenir = /souvenir/i.test(query);
 
   const candidates = [];
   for (const [key, item] of Object.entries(items)) {
     if (!isWeaponOrKnifeOrGloves(key)) continue;
+    // Filtra abstratos (sem wear, sem skin |) — não existem no Steam Market real.
+    const hasWear = /\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)$/.test(key);
+    if (!hasWear) continue;
+    if (!key.includes(' | ')) continue;
+    // StatTrak/Souvenir: só se query pediu explicitamente
+    if (!wantsStatTrak && /StatTrak™/.test(key)) continue;
+    if (!wantsSouvenir && /^Souvenir\s+/.test(key)) continue;
+
     const k = normalizeName(key);
     if (!words.every(w => k.includes(w))) continue;
     const youpin = getYoupinPrice(item);
