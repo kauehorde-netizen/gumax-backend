@@ -643,16 +643,17 @@ async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY
     const youpin = getYoupinPrice(item);
     if (youpin < minPriceCNY || youpin > maxPriceCNY) continue;
     // Conta liquidez (quantas plataformas têm preço REAL) — proxy de popularidade.
-    // Items mais líquidos = vendidos em mais marketplaces = mais relevantes pra UX.
     const platforms = ['buff', 'youpin', 'c5game', 'csfloat', 'csmoney', 'steam']
       .filter(p => extractPriceField(item[p]) > 0).length;
+    // Filtro de qualidade: pelo menos 3 plataformas tem que ter preço (item realmente
+    // vendido em múltiplos lugares — descarta dados quebrados/items mortos).
+    if (platforms < 3) continue;
     matches.push({ name, youpin, platforms, item });
   }
-  // Ordena por LIQUIDEZ (mais plataformas = mais vendido) E DEPOIS preço asc.
-  // Antes ordenava por preço desc → trazia outliers caros e exóticos pra cima
-  // (ex: Gut Knife Safari Mesh marcado erroneamente como ¥195k pelo Pricempire).
-  // Agora prioriza items REAIS de mercado, não dados quebrados.
-  matches.sort((a, b) => b.platforms - a.platforms || a.youpin - b.youpin);
+  // Ordenação: dentro do filtro de liquidez (3+ plataformas + cap 50k), pega os
+  // MAIS CAROS primeiro. Isso mostra facas top (Karambit, Butterfly, M9), rifles
+  // populares (AK Asiimov, AWP Asiimov), etc — em vez de Navaja/Gut baratas.
+  matches.sort((a, b) => b.youpin - a.youpin);
   const top = matches.slice(0, limit);
 
   // Aplica pricing pra converter CNY → BRL
