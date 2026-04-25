@@ -58,29 +58,38 @@ exports.handler = async (event) => {
 
     console.log(`[SkinIcon] Looking up: ${name}${name !== rawName ? ' (cleaned from: ' + rawName + ')' : ''}`);
 
-    // Method 0: SteamWebAPI items search (PRIMEIRO — mais confiável que Steam Market scraping).
-    // Tem TODOS os items do CS2 incluindo Gamma Doppler phases, Crimson Web variants, etc.
+    // Method 0: SteamWebAPI items search com VALIDAÇÃO de tipo de retorno.
+    // Se busca por knife retornar Case/Capsule, rejeita e tenta próximo método.
     try {
       const SWAPI_KEY = process.env.STEAMWEBAPI_KEY;
       if (SWAPI_KEY) {
         const encoded = encodeURIComponent(name);
-        const url = `https://www.steamwebapi.com/steam/api/items?key=${SWAPI_KEY}&game=cs2&search=${encoded}&limit=1`;
+        const url = `https://www.steamwebapi.com/steam/api/items?key=${SWAPI_KEY}&game=cs2&search=${encoded}&limit=3`;
         const res = await httpGet(url, { timeout: 6000 });
         if (res.status === 200) {
           const items = JSON.parse(res.body);
           if (Array.isArray(items) && items.length > 0) {
-            const it = items[0];
-            let icon = it.image || it.icon_url || it.iconUrl || it.icon || '';
-            if (icon && !icon.startsWith('http')) {
-              icon = `https://community.akamai.steamstatic.com/economy/image/${icon}/256fx256f`;
-            } else if (icon) {
-              icon = icon.replace(/\/\d+fx\d+f$/, '/256fx256f').replace(/\/\d+x\d+$/, '/256x256');
-            }
-            if (icon) {
-              const type = it.type || '';
-              iconCache.set(name, { icon, type });
-              console.log(`[SkinIcon] ✅ SteamWebAPI: ${name}`);
-              return { statusCode: 200, headers: H, body: JSON.stringify({ success: true, name: it.markethashname || name, icon, type }) };
+            // Valida: rejeita case/capsule quando não pedimos
+            const askedBox = /\b(case|capsule|package)\b/i.test(name);
+            for (const it of items) {
+              const itName = it.markethashname || it.market_hash_name || it.name || '';
+              const itType = (it.type || '').toLowerCase();
+              const isBox = itType.includes('case') || itType.includes('capsule') ||
+                            /\b(case|capsule|package|sticker capsule)\b/i.test(itName);
+              if (isBox && !askedBox) continue;
+              // Knife: tem que ter ★ se pedimos knife
+              if (name.startsWith('★') && !itName.startsWith('★')) continue;
+              let icon = it.image || it.icon_url || it.iconUrl || it.icon || '';
+              if (icon && !icon.startsWith('http')) {
+                icon = `https://community.akamai.steamstatic.com/economy/image/${icon}/256fx256f`;
+              } else if (icon) {
+                icon = icon.replace(/\/\d+fx\d+f$/, '/256fx256f').replace(/\/\d+x\d+$/, '/256x256');
+              }
+              if (icon) {
+                iconCache.set(name, { icon, type: it.type || '' });
+                console.log(`[SkinIcon] ✅ SteamWebAPI: ${name} → ${itName}`);
+                return { statusCode: 200, headers: H, body: JSON.stringify({ success: true, name: itName, icon, type: it.type || '' }) };
+              }
             }
           }
         }
