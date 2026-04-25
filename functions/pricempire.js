@@ -629,12 +629,17 @@ function matchesCategory(name, type) {
   }
   // Pra weapons/knives/gloves: SEMPRE exige wear suffix no final.
   // Sem isso, items como "★ Karambit" ou "★ StatTrak™ Karambit" (entries
-  // abstratas do Pricempire) entrariam mas não existem no Steam Market real
-  // → fotos quebradas. Items legítimos sempre têm "(Factory New)" etc.
+  // abstratas do Pricempire sem skin/wear) entram mas não existem no Steam Market
+  // real → fotos quebradas/erradas. Items legítimos sempre têm "(Factory New)" etc.
   const hasWear = /\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)$/.test(name);
   if (!hasWear) return false;
-  // Tem que ter "|" (skin name) — items vanilla "★ Karambit (...)" sem skin não interessam
+  // Tem que ter "|" (skin name)
   if (!name.includes(' | ')) return false;
+  // Filtra StatTrak™ e Souvenir das listagens default — vendem pouco, poluem grid.
+  // User pode buscar "StatTrak" ou "Souvenir" no campo de nome se quiser ver.
+  if (/^StatTrak™\s/.test(name)) return false;
+  if (/^★\s+StatTrak™\s/.test(name)) return false;
+  if (/^Souvenir\s+/.test(name)) return false;
   if (type === 'knife')  return matchesKnifeBE(name);
   if (type === 'gloves') return matchesGlovesBE(name);
   if (WEAPON_CLASSES_BE[type]) return matchesWeaponClass(name, type);
