@@ -643,6 +643,71 @@ function matchesCategory(name, type) {
 
 // Cap default: ¥19000 ≈ R$15.000 (com fator ~0.78). Items acima são raridades
 // que normalmente não têm fotos no ByMykel DB (Doppler phases, Crimson Web, etc).
+// Cache em memória da DB de imagens do ByMykel/CSGO-API (super confiável,
+// indexa pelo nome canônico — inclui knives, gloves, weapon skins, stickers, agents).
+let _bymykelCache = null;
+let _bymykelCacheTs = 0;
+const BYMYKEL_CACHE_TTL = 24 * 60 * 60 * 1000; // 24h
+
+async function loadBymykelImages() {
+  if (_bymykelCache && Date.now() - _bymykelCacheTs < BYMYKEL_CACHE_TTL) {
+    return _bymykelCache;
+  }
+  const sources = [
+    'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/skins.json',
+    'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/stickers.json',
+    'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/agents.json',
+    'https://raw.githubusercontent.com/ByMykel/CSGO-API/main/public/api/en/keychains.json',
+  ];
+  const map = Object.create(null);
+  await Promise.all(sources.map(async (url) => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (!Array.isArray(data)) return;
+      for (const item of data) {
+        if (item.name && item.image) map[item.name] = item.image;
+      }
+    } catch (e) { console.log('[ByMykel] erro:', e.message); }
+  }));
+  _bymykelCache = map;
+  _bymykelCacheTs = Date.now();
+  console.log(`[ByMykel] ${Object.keys(map).length} items carregados`);
+  return map;
+}
+
+// Resolve URL da imagem testando variantes do nome.
+function resolveImageFromBymykel(map, fullName) {
+  if (!fullName || !map) return '';
+  const variants = new Set([fullName]);
+  // Sem wear
+  const noWear = fullName.replace(/\s*\([^)]+\)\s*$/, '').trim();
+  variants.add(noWear);
+  // Sem ★
+  variants.add(fullName.replace(/^★\s*/, '').trim());
+  variants.add(noWear.replace(/^★\s*/, '').trim());
+  // Sem StatTrak™
+  variants.add(fullName.replace(/^StatTrak™\s*/, '').trim());
+  variants.add(fullName.replace(/^★\s*StatTrak™\s*/, '').trim());
+  // Sem Souvenir
+  variants.add(fullName.replace(/^Souvenir\s+/, '').trim());
+  // Combinações
+  const fullyStripped = fullName
+    .replace(/^Souvenir\s+/, '')
+    .replace(/^★\s*/, '')
+    .replace(/^StatTrak™\s*/, '')
+    .replace(/^★\s*/, '')
+    .trim();
+  variants.add(fullyStripped);
+  variants.add(fullyStripped.replace(/\s*\([^)]+\)\s*$/, '').trim());
+
+  for (const v of variants) {
+    if (map[v]) return map[v];
+  }
+  return '';
+}
+
 async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY = 19000) {
   const items = await fetchPricempireItems();
   const matches = [];
@@ -671,14 +736,17 @@ async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY
     getBaseFactor(),
   ]);
 
-  return top.map(x => {
+  // Carrega DB de imagens do ByMykel (cacheado em memória 24h)
+  const bymykelMap = await loadBymykelImages();
+
+  // Resolve imagem pra cada item, DESCARTA items sem imagem (evita cards quebrados/caixas)
+  const enriched = [];
+  for (const x of top) {
+    const icon = resolveImageFromBymykel(bymykelMap, x.name);
+    if (!icon) continue; // pula items sem imagem confiável
     const steamCNY = extractPriceField(x.item.steam);
     const steamEstCNY = steamCNY > 0 ? steamCNY : x.youpin * 1.35;
-    // Icon fallback: Pricempire pode ter o icon em .icon, .image ou .image_url.
-    // Pra stickers/charms/agents muitas vezes o campo é vazio — frontend vai
-    // resolver via Steam Market /priceoverview usando o nome (fallback existente).
-    const iconRaw = x.item.icon || x.item.image || x.item.image_url || '';
-    return {
+    enriched.push({
       name: x.name,
       price_cny: x.youpin,
       steam_price_cny: steamEstCNY,
@@ -686,10 +754,11 @@ async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY
       saleBRL: applyPricing(x.youpin, saleFactor),
       rarity: x.item.rarity || 'Common',
       type: x.item.type || type,
-      iconUrl: buildIconUrl(iconRaw),
+      iconUrl: icon,
       source: 'pricempire_category',
-    };
-  });
+    });
+  }
+  return enriched;
 }
 
 // Estende o handler HTTP com a rota /by-category
