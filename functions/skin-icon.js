@@ -58,6 +58,35 @@ exports.handler = async (event) => {
 
     console.log(`[SkinIcon] Looking up: ${name}${name !== rawName ? ' (cleaned from: ' + rawName + ')' : ''}`);
 
+    // Method 0: SteamWebAPI items search (PRIMEIRO — mais confiável que Steam Market scraping).
+    // Tem TODOS os items do CS2 incluindo Gamma Doppler phases, Crimson Web variants, etc.
+    try {
+      const SWAPI_KEY = process.env.STEAMWEBAPI_KEY;
+      if (SWAPI_KEY) {
+        const encoded = encodeURIComponent(name);
+        const url = `https://www.steamwebapi.com/steam/api/items?key=${SWAPI_KEY}&game=cs2&search=${encoded}&limit=1`;
+        const res = await httpGet(url, { timeout: 6000 });
+        if (res.status === 200) {
+          const items = JSON.parse(res.body);
+          if (Array.isArray(items) && items.length > 0) {
+            const it = items[0];
+            let icon = it.image || it.icon_url || it.iconUrl || it.icon || '';
+            if (icon && !icon.startsWith('http')) {
+              icon = `https://community.akamai.steamstatic.com/economy/image/${icon}/256fx256f`;
+            } else if (icon) {
+              icon = icon.replace(/\/\d+fx\d+f$/, '/256fx256f').replace(/\/\d+x\d+$/, '/256x256');
+            }
+            if (icon) {
+              const type = it.type || '';
+              iconCache.set(name, { icon, type });
+              console.log(`[SkinIcon] ✅ SteamWebAPI: ${name}`);
+              return { statusCode: 200, headers: H, body: JSON.stringify({ success: true, name: it.markethashname || name, icon, type }) };
+            }
+          }
+        }
+      }
+    } catch (e) { console.log(`[SkinIcon] SteamWebAPI error: ${e.message}`); }
+
     // Heurística pra detectar se um item retornado bate com o que pedimos:
     // - Pediu knife (★) → retorno tem que começar com ★ e NÃO ter "Case" no nome
     // - Pediu weapon (AK-47, AWP, etc) → retorno tem que conter o prefixo da arma
@@ -116,34 +145,6 @@ exports.handler = async (event) => {
         return { statusCode: 200, headers: H, body: JSON.stringify({ success: false, error: 'Rate limited', retryable: true }) };
       }
     } catch (e) { console.log(`[SkinIcon] Market error: ${e.message}`); }
-
-    // Method 2: SteamWebAPI items search (fallback)
-    try {
-      const SWAPI_KEY = process.env.STEAMWEBAPI_KEY;
-      if (SWAPI_KEY) {
-        const encoded = encodeURIComponent(name);
-        const url = `https://www.steamwebapi.com/steam/api/items?key=${SWAPI_KEY}&game=cs2&search=${encoded}&limit=1`;
-        const res = await httpGet(url, { timeout: 6000 });
-        if (res.status === 200) {
-          const items = JSON.parse(res.body);
-          if (Array.isArray(items) && items.length > 0) {
-            const it = items[0];
-            let icon = it.image || it.icon_url || it.iconUrl || it.icon || '';
-            if (icon && !icon.startsWith('http')) {
-              icon = `https://community.akamai.steamstatic.com/economy/image/${icon}/256fx256f`;
-            } else if (icon) {
-              icon = icon.replace(/\/\d+fx\d+f$/, '/256fx256f').replace(/\/\d+x\d+$/, '/256x256');
-            }
-            if (icon) {
-              const type = it.type || '';
-              iconCache.set(name, { icon, type });
-              console.log(`[SkinIcon] ✅ SteamWebAPI: ${name}`);
-              return { statusCode: 200, headers: H, body: JSON.stringify({ success: true, name: it.markethashname || name, icon, type }) };
-            }
-          }
-        }
-      }
-    } catch (e) { console.log(`[SkinIcon] SteamWebAPI error: ${e.message}`); }
 
     console.log(`[SkinIcon] ❌ Not found: ${name}`);
     return { statusCode: 200, headers: H, body: JSON.stringify({ success: false, error: 'Icon not found', retryable: true }) };
