@@ -635,7 +635,9 @@ function matchesCategory(name, type) {
   return false;
 }
 
-async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY = 50000) {
+// Cap default: ¥19000 ≈ R$15.000 (com fator ~0.78). Items acima são raridades
+// que normalmente não têm fotos no ByMykel DB (Doppler phases, Crimson Web, etc).
+async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY = 19000) {
   const items = await fetchPricempireItems();
   const matches = [];
   for (const [name, item] of Object.entries(items)) {
