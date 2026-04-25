@@ -40,38 +40,80 @@ exports.handler = async (event) => {
 
   try {
     const body = JSON.parse(event.body || '{}');
-    const name = body.name;
-    if (!name) return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'name required' }) };
+    const rawName = body.name;
+    if (!rawName) return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'name required' }) };
 
-    // Check cache first
+    // Limpa o nome antes de buscar no Steam Market.
+    // Sufixos como " - Ruby", " - Black Pearl", " - Phase 2" são adicionados por
+    // outras DBs (Pricempire, CSGOFloat) mas Steam Market NÃO usa esses sufixos
+    // no market_hash_name. Buscar com eles devolve match fuzzy errado (ex: caixa
+    // contendo a skin ao invés da skin).
+    const name = rawName.replace(/\s*-\s*(Ruby|Sapphire|Black Pearl|Emerald|Phase\s*[1-4]|Gamma\s*Phase\s*[1-4])\s*$/i, '').trim();
+
+    // Check cache first (key by cleaned name)
     if (iconCache.has(name)) {
       const cached = iconCache.get(name);
       return { statusCode: 200, headers: H, body: JSON.stringify({ success: true, name, icon: cached.icon, type: cached.type, source: 'cache' }) };
     }
 
-    console.log(`[SkinIcon] Looking up: ${name}`);
+    console.log(`[SkinIcon] Looking up: ${name}${name !== rawName ? ' (cleaned from: ' + rawName + ')' : ''}`);
 
-    // Method 1: Steam Community Market search
+    // Heurística pra detectar se um item retornado bate com o que pedimos:
+    // - Pediu knife (★) → retorno tem que começar com ★ e NÃO ter "Case" no nome
+    // - Pediu weapon (AK-47, AWP, etc) → retorno tem que conter o prefixo da arma
+    // - Pediu sticker → retorno deve começar com "Sticker"
+    function isResultRelevant(askedName, returnedName) {
+      if (!returnedName) return false;
+      const asked = askedName.toLowerCase();
+      const returned = returnedName.toLowerCase();
+      // Rejeita caixas/capsules quando pedimos arma/faca/luva
+      if (/\b(case|capsule|package|sticker capsule)\b/i.test(returnedName) &&
+          !/\b(case|capsule|package)\b/i.test(askedName)) return false;
+      // Knife: ambos devem começar com ★
+      if (asked.startsWith('★') && !returned.startsWith('★')) return false;
+      // Sticker: ambos devem começar com "sticker"
+      if (asked.startsWith('sticker |') && !returned.startsWith('sticker |')) return false;
+      // Weapon prefix match: "AK-47 | Redline" → returned must start with "AK-47 |"
+      const askedPrefix = asked.replace(/^★\s*/, '').replace(/^stattrak™\s*/, '').replace(/^souvenir\s+/, '').split(' |')[0];
+      if (askedPrefix && !returned.includes(askedPrefix)) return false;
+      return true;
+    }
+
+    // Method 1: Steam Community Market search com count=5 pra escolher o melhor match
     try {
       const encoded = encodeURIComponent(name);
-      const url = `https://steamcommunity.com/market/search/render/?appid=730&norender=1&search_description=0&start=0&count=1&query=${encoded}`;
+      const url = `https://steamcommunity.com/market/search/render/?appid=730&norender=1&search_description=0&start=0&count=5&query=${encoded}`;
       const res = await httpGet(url, { timeout: 8000 });
       if (res.status === 200) {
         const data = JSON.parse(res.body);
         if (data.success && data.results && data.results.length > 0) {
-          const item = data.results[0];
-          const iconHash = item.asset_description?.icon_url || '';
+          // Procura entre os top 5 o que casa com o tipo pedido
+          let pickedItem = null;
+          for (const item of data.results) {
+            const itemName = item.asset_description?.market_hash_name || item.hash_name || item.name || '';
+            if (isResultRelevant(name, itemName)) {
+              pickedItem = item;
+              break;
+            }
+          }
+          // Se nada matchou, NÃO retorna lixo — devolve null pra frontend cair em shimmer
+          if (!pickedItem) {
+            console.log(`[SkinIcon] ⚠️ ${data.results.length} resultados mas nenhum bate com "${name}" — retornando null`);
+            iconCache.set(name, { icon: '', type: '' }); // negative cache pra não tentar de novo
+            return { statusCode: 200, headers: H, body: JSON.stringify({ success: false, error: 'no relevant match' }) };
+          }
+          const iconHash = pickedItem.asset_description?.icon_url || '';
           if (iconHash) {
             const icon = `https://community.akamai.steamstatic.com/economy/image/${iconHash}/256fx256f`;
-            const type = item.asset_description?.type || '';
+            const type = pickedItem.asset_description?.type || '';
             iconCache.set(name, { icon, type });
-            console.log(`[SkinIcon] ✅ Market: ${name}`);
-            return { statusCode: 200, headers: H, body: JSON.stringify({ success: true, name: item.hash_name || name, icon, type }) };
+            console.log(`[SkinIcon] ✅ Market: ${name} → ${pickedItem.hash_name || name}`);
+            return { statusCode: 200, headers: H, body: JSON.stringify({ success: true, name: pickedItem.hash_name || name, icon, type }) };
           }
         }
       } else if (res.status === 429) {
-        console.log(`[SkinIcon] Rate limited, will retry later`);
-        return { statusCode: 200, headers: H, body: JSON.stringify({ success: false, error: 'Rate limited, retry later', retryable: true }) };
+        console.log(`[SkinIcon] Rate limited`);
+        return { statusCode: 200, headers: H, body: JSON.stringify({ success: false, error: 'Rate limited', retryable: true }) };
       }
     } catch (e) { console.log(`[SkinIcon] Market error: ${e.message}`); }
 
