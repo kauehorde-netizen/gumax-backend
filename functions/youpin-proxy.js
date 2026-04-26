@@ -100,10 +100,10 @@ exports.handler = async (event) => {
 
   const path = event.path || '';
 
-  // GET /api/youpin/top-sellers?limit=50
+  // GET /api/youpin/top-sellers?limit=200 (cap pra cobrir 4 páginas × 40 + sobra após dedupe)
   if (event.httpMethod === 'GET' && path.endsWith('/top-sellers')) {
     const q = event.queryStringParameters || {};
-    const limit = Math.min(100, Math.max(1, parseInt(q.limit, 10) || 50));
+    const limit = Math.min(300, Math.max(1, parseInt(q.limit, 10) || 50));
     try {
       const items = await fetchYoupinTopSellers(limit);
       return json(200, { count: items.length, items, cachedAt: global._youpinTopCache?.ts || null });
