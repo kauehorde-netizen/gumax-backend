@@ -349,7 +349,7 @@ async function suggestSkins(query, limit = 10) {
 // Busca cards do catálogo completo (não só top-sellers).
 // Retorna itens com preços já aplicados (originalBRL, saleBRL, iconUrl) prontos pro frontend.
 // Usado pela home quando o user digita na busca — permite encontrar qualquer skin do Youpin.
-async function searchCatalog(query, limit = 40, minPriceCNY = 1, maxPriceCNY = 200000) {
+async function searchCatalog(query, limit = 200, minPriceCNY = 1, maxPriceCNY = 200000) {
   const items = await fetchPricempireItems();
   const q = normalizeName(query);
   if (!q) return [];
@@ -570,11 +570,13 @@ exports.handler = async (event) => {
     return json(200, { query: q, count: suggestions.length, suggestions });
   }
 
-  // GET /api/pricempire/search?q=ak+redline&limit=40
-  // Busca no catálogo inteiro, retorna cards prontos com preços aplicados
+  // GET /api/pricempire/search?q=ak+redline&limit=200
+  // Busca no catálogo inteiro, retorna cards prontos com preços aplicados.
+  // Cap em 200 pra cobrir famílias grandes (ex: Driver Gloves Field-Tested = 17 variantes
+  // × 5 wears = pode chegar perto de 100; com paginação no frontend, OK ter mais).
   if (event.httpMethod === 'GET' && path.endsWith('/search')) {
     const q = (event.queryStringParameters || {}).q || '';
-    const limit = Math.min(80, Math.max(1, parseInt((event.queryStringParameters || {}).limit, 10) || 40));
+    const limit = Math.min(200, Math.max(1, parseInt((event.queryStringParameters || {}).limit, 10) || 200));
     const items = await searchCatalog(q, limit);
     return json(200, { query: q, count: items.length, items });
   }
