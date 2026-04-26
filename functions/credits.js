@@ -49,6 +49,16 @@ function requireAdmin(headers) {
   return k && k === process.env.ADMIN_API_KEY;
 }
 
+// Nova versão: valida via Firebase ID token + ADMIN_EMAILS env.
+// É o que o admin.html usa (já que migrou pra ID token).
+async function requireAdminToken(headers) {
+  const decoded = await verifyIdToken(headers);
+  if (!decoded) return null;
+  const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim().toLowerCase());
+  if (!adminEmails.includes((decoded.email || '').toLowerCase())) return null;
+  return decoded;
+}
+
 // Garante shape padrão num doc (migra docs legados que só tinham "balance")
 function normalize(data) {
   const sub = typeof data.subscriptionBalance === 'number' ? data.subscriptionBalance : 0;
@@ -72,6 +82,21 @@ function normalize(data) {
 
 async function getBalance(uid) {
   const db = admin.firestore();
+
+  // VIP: créditos ilimitados (admins, Gu, influencers liberados pelo admin).
+  try {
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (userDoc.exists && userDoc.data().unlimitedCredits === true) {
+      return {
+        balance: 999999, subscriptionBalance: 0, purchasedBalance: 999999,
+        grantedInitial: true, lifetime: 0, purchased: 0,
+        unlimited: true,
+      };
+    }
+  } catch (e) {
+    console.warn('[credits.getBalance] VIP check failed:', e.message);
+  }
+
   const ref = db.collection('credits').doc(uid);
   const doc = await ref.get();
   if (!doc.exists) {
@@ -139,6 +164,29 @@ async function consume(uid, amount, reason, meta = {}) {
   }
 
   const db = admin.firestore();
+
+  // ── VIP: usuários com flag unlimitedCredits=true (admins, Gu, influencers
+  //    que ele liberou) NÃO consomem nada. Útil pra teste e cortesia.
+  try {
+    const userDoc = await db.collection('users').doc(uid).get();
+    if (userDoc.exists && userDoc.data().unlimitedCredits === true) {
+      // Loga a "consumo VIP" no histórico pra o Gu ver quem usou e quanto
+      await db.collection('credit_transactions').add({
+        uid,
+        type: 'consume_vip',
+        amount: 0,
+        wouldHaveCost: amount,
+        balanceAfter: 999999,
+        reason: `VIP: ${reason}`,
+        meta,
+        createdAt: new Date().toISOString(),
+      });
+      return { ok: true, balance: 999999, consumed: 0, vip: true };
+    }
+  } catch (e) {
+    console.warn('[credits.consume] VIP check failed (continuing normal flow):', e.message);
+  }
+
   const ref = db.collection('credits').doc(uid);
 
   return db.runTransaction(async (tx) => {
@@ -335,6 +383,40 @@ exports.handler = async (event) => {
       }
       const result = await award(uid, amount, reason, meta || {});
       return json(200, result);
+    }
+
+    // ── Admin: dar créditos manualmente pra um cliente específico (influencer, brinde) ──
+    // POST /api/credits/admin/grant { uid, amount, reason }
+    if (path.includes('/admin/grant')) {
+      const adminUser = await requireAdminToken(headers);
+      if (!adminUser) return json(401, { error: 'admin only' });
+      const { uid, amount, reason } = body;
+      if (!uid || !Number.isInteger(amount) || amount <= 0) {
+        return json(400, { error: 'uid and positive integer amount required' });
+      }
+      const result = await award(uid, amount, reason || 'admin_grant', {
+        bucket: 'purchased',
+        grantedBy: adminUser.email,
+      });
+      return json(200, result);
+    }
+
+    // ── Admin: ativar/desativar créditos ilimitados (VIP) num cliente ──
+    // POST /api/credits/admin/set-vip { uid, unlimited: true|false }
+    if (path.includes('/admin/set-vip')) {
+      const adminUser = await requireAdminToken(headers);
+      if (!adminUser) return json(401, { error: 'admin only' });
+      const { uid, unlimited } = body;
+      if (!uid || typeof unlimited !== 'boolean') {
+        return json(400, { error: 'uid and boolean unlimited required' });
+      }
+      const db = admin.firestore();
+      await db.collection('users').doc(uid).set({
+        unlimitedCredits: unlimited,
+        unlimitedCreditsBy: adminUser.email,
+        unlimitedCreditsAt: new Date().toISOString(),
+      }, { merge: true });
+      return json(200, { ok: true, uid, unlimited });
     }
 
     return json(404, { error: 'Unknown credits endpoint' });
