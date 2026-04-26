@@ -61,11 +61,19 @@ async function requireAdminToken(headers) {
   const adminUids = (process.env.ADMIN_UIDS || '').split(',').map(s => s.trim()).filter(Boolean);
   if (email && adminEmails.includes(email)) return decoded;
   if (uid && adminUids.includes(uid)) return decoded;
-  // Fallback: olha flag no Firestore (admin pode marcar via console)
+  // Fallback 1: doc users/{uid} com isAdmin=true
   try {
     const userDoc = await admin.firestore().collection('users').doc(uid).get();
     if (userDoc.exists && userDoc.data().isAdmin === true) return decoded;
   } catch (e) {}
+  // Fallback 2: query por email (Steam tem UID = SteamID; Gmail tem outro UID)
+  if (email) {
+    try {
+      const q = await admin.firestore().collection('users')
+        .where('email', '==', email).where('isAdmin', '==', true).limit(1).get();
+      if (!q.empty) return decoded;
+    } catch (e) {}
+  }
   return null;
 }
 
