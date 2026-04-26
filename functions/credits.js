@@ -49,14 +49,24 @@ function requireAdmin(headers) {
   return k && k === process.env.ADMIN_API_KEY;
 }
 
-// Nova versão: valida via Firebase ID token + ADMIN_EMAILS env.
-// É o que o admin.html usa (já que migrou pra ID token).
+// Nova versão: valida via Firebase ID token + ADMIN_EMAILS ou ADMIN_UIDS env.
+// Aceita admin via email (Google login) OU via UID (Steam login não tem email).
+// Também olha users/{uid}.isAdmin === true como fallback.
 async function requireAdminToken(headers) {
   const decoded = await verifyIdToken(headers);
   if (!decoded) return null;
-  const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim().toLowerCase());
-  if (!adminEmails.includes((decoded.email || '').toLowerCase())) return null;
-  return decoded;
+  const email = (decoded.email || '').toLowerCase();
+  const uid = decoded.uid || '';
+  const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  const adminUids = (process.env.ADMIN_UIDS || '').split(',').map(s => s.trim()).filter(Boolean);
+  if (email && adminEmails.includes(email)) return decoded;
+  if (uid && adminUids.includes(uid)) return decoded;
+  // Fallback: olha flag no Firestore (admin pode marcar via console)
+  try {
+    const userDoc = await admin.firestore().collection('users').doc(uid).get();
+    if (userDoc.exists && userDoc.data().isAdmin === true) return decoded;
+  } catch (e) {}
+  return null;
 }
 
 // Garante shape padrão num doc (migra docs legados que só tinham "balance")
