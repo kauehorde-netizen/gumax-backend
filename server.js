@@ -218,6 +218,8 @@ app.post('/api/credits/balance', rateLimit(60000, 60), wrapHandler(creditsHandle
 app.post('/api/credits/grant-initial', rateLimit(60000, 5), wrapHandler(creditsHandler));
 app.post('/api/credits/consume', rateLimit(60000, 60), wrapHandler(creditsHandler));
 app.post('/api/credits/award', rateLimit(60000, 20), wrapHandler(creditsHandler));
+app.post('/api/credits/admin/grant',   rateLimit(60000, 30), wrapHandler(creditsHandler));
+app.post('/api/credits/admin/set-vip', rateLimit(60000, 30), wrapHandler(creditsHandler));
 app.options('/api/credits/*', (req, res) => res.sendStatus(204));
 
 // Skin analysis: paid tiers debit credits atomically; cache 15min
