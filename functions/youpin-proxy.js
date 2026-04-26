@@ -16,8 +16,11 @@ const CORS = {
 // Cache 1h em memória.
 const TOP_CACHE_TTL = 60 * 60 * 1000;
 async function fetchYoupinTopSellers(limit = 50) {
+  // Cache hit — só vale se tiver dados (nunca devolve cache vazio,
+  // pra evitar erro temporário do Pricempire envenenar o cache por 1h).
   if (global._youpinTopCache && Date.now() - global._youpinTopCache.ts < TOP_CACHE_TTL
-      && global._youpinTopCache.limit >= limit) {
+      && global._youpinTopCache.limit >= limit
+      && global._youpinTopCache.data?.length > 0) {
     return global._youpinTopCache.data.slice(0, limit);
   }
 
@@ -40,13 +43,24 @@ async function fetchYoupinTopSellers(limit = 50) {
       type: it.type,
       source: 'pricempire',
     }));
-    global._youpinTopCache = { data: all, ts: Date.now(), limit };
+    // Só cacheia se tiver dados — array vazio = falha mascarada, não cacheia.
+    if (all.length > 0) {
+      global._youpinTopCache = { data: all, ts: Date.now(), limit };
+    } else {
+      console.warn('[Top sellers] pricempire devolveu 0 items — NÃO cacheando');
+    }
     return all;
   } catch (e) {
-    console.error('[Top sellers] pricempire error:', e.message);
+    console.error('[Top sellers] pricempire error:', e.message, e.stack);
     return [];
   }
 }
+
+// Força reset do cache. Útil quando Pricempire teve erro e cacheou vazio.
+function clearYoupinTopCache() {
+  global._youpinTopCache = null;
+}
+exports.clearYoupinTopCache = clearYoupinTopCache;
 
 // Mantido pra compatibilidade — caso a gente queira futuramente voltar a usar Youpin
 async function fetchYoupinTopSellersDirect(limit = 50) {
@@ -101,9 +115,14 @@ exports.handler = async (event) => {
   const path = event.path || '';
 
   // GET /api/youpin/top-sellers?limit=200 (cap pra cobrir 4 páginas × 40 + sobra após dedupe)
+  // Aceita ?refresh=1 pra forçar bypass do cache (útil quando o cache envenenou).
   if (event.httpMethod === 'GET' && path.endsWith('/top-sellers')) {
     const q = event.queryStringParameters || {};
     const limit = Math.min(300, Math.max(1, parseInt(q.limit, 10) || 50));
+    if (q.refresh === '1') {
+      clearYoupinTopCache();
+      console.log('[Top sellers] cache invalidado por ?refresh=1');
+    }
     try {
       const items = await fetchYoupinTopSellers(limit);
       return json(200, { count: items.length, items, cachedAt: global._youpinTopCache?.ts || null });
