@@ -126,6 +126,7 @@ const creditsPurchaseMod = safeRequire('./functions/credits-purchase', 'credits-
 const buybackMod         = safeRequire('./functions/buyback', 'buyback');
 const floatInspectorMod  = safeRequire('./functions/float-inspector', 'float-inspector');
 const rafflesMod         = safeRequire('./functions/raffles', 'raffles');
+const inspectLinkMod     = safeRequire('./functions/inspect-link', 'inspect-link');
 
 const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
 const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
@@ -143,6 +144,7 @@ const creditsPurchaseHandler = creditsPurchaseMod?.handler || disabledRoute('cre
 const buybackHandler         = buybackMod?.handler     || disabledRoute('buyback');
 const floatInspectorHandler  = floatInspectorMod?.handler || disabledRoute('float-inspector');
 const rafflesHandler         = rafflesMod?.handler     || disabledRoute('raffles');
+const inspectLinkHandler     = inspectLinkMod?.handler || disabledRoute('inspect-link');
 // Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
 // Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
 function safeRequire(path, label) {
@@ -251,6 +253,9 @@ app.post('/api/raffles/admin/create', rateLimit(60000, 5), wrapHandler(rafflesHa
 app.post('/api/raffles/admin/draw',   rateLimit(60000, 5), wrapHandler(rafflesHandler));
 app.post('/api/raffles/admin/cancel', rateLimit(60000, 5), wrapHandler(rafflesHandler));
 app.options('/api/raffles/*', (req, res) => res.sendStatus(204));
+
+// ── Inspect link resolver (busca link genérico do Steam Market pra skins sem ownership) ──
+app.get('/api/inspect-link', rateLimit(60000, 30), wrapHandler(inspectLinkHandler));
 
 // ── Pricempire API (fonte canônica de preços, base Youpin) ──
 app.get('/api/pricempire/items', rateLimit(60000, 20), wrapHandler(pricempireHandler));
