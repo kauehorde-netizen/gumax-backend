@@ -177,13 +177,17 @@ async function syncSingleAccount(steamId, pricempireIndex, cnyRate, syncTime, st
     function findRealInspectLink(actions, sid, aid) {
       if (!Array.isArray(actions)) return null;
       for (const a of actions) {
-        if (!a?.link || !/Inspect/i.test(a.name || '')) continue;
-        // Substitui placeholders
+        if (!a?.link) continue;
+        // NÃO filtra por `name` — Steam responde no idioma do user
+        // ("Inspect", "Inspecionar", "检查", etc). Validamos pelo LINK em si.
+        if (!/csgo_econ_action_preview/.test(a.link)) continue;
+        // Substitui placeholders (todas ocorrências, todos formatos comuns)
         let link = a.link
-          .replace('%owner_steamid%', sid)
-          .replace('%assetid%', aid);
-        // Valida formato: tem csgo_econ_action_preview E tem S/M + A + D params
-        if (/csgo_econ_action_preview/.test(link) && /[SM]\d+A\d+D\d+/.test(link)) {
+          .replace(/%owner_steamid%/g, sid)
+          .replace(/%assetid%/g, aid)
+          .replace(/%assetid_string%/g, aid);
+        // Valida formato final: tem S/M + A + D params (D é assinatura da Steam)
+        if (/[SM]\d+A\d+D\d+/.test(link)) {
           return link;
         }
       }
