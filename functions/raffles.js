@@ -41,10 +41,19 @@ async function requireAdmin(event) {
     const adminUids = (process.env.ADMIN_UIDS || '').split(',').map(s => s.trim()).filter(Boolean);
     if (email && adminEmails.includes(email)) return decoded;
     if (uid && adminUids.includes(uid)) return decoded;
+    // Fallback 1: doc users/{uid} com isAdmin=true
     try {
       const userDoc = await admin.firestore().collection('users').doc(uid).get();
       if (userDoc.exists && userDoc.data().isAdmin === true) return decoded;
     } catch (e) {}
+    // Fallback 2: query users por email com isAdmin=true (Steam tem doc separado do Gmail)
+    if (email) {
+      try {
+        const q = await admin.firestore().collection('users')
+          .where('email', '==', email).where('isAdmin', '==', true).limit(1).get();
+        if (!q.empty) return decoded;
+      } catch (e) {}
+    }
     return null;
   } catch (e) {
     return null;
