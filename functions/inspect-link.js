@@ -56,16 +56,32 @@ function httpsGet(url, opts = {}) {
 }
 
 // Substitui placeholders comuns e valida formato.
-// Retorna null se o link não tem o pattern S/M+A+D necessário.
+// Retorna { link, raw, substituted } pra debug.
 function normalizeInspectLink(rawLink, listingId, assetId) {
-  if (!rawLink) return null;
+  if (!rawLink) return { link: null, raw: null, error: 'no_raw_link' };
   let link = rawLink
-    .replace(/%listingid%/g, listingId || '0')
-    .replace(/%assetid%/g, assetId || '0')
-    .replace(/%assetid_string%/g, assetId || '0')
-    .replace(/%owner_steamid%/g, STEAM_MARKET_OWNER_ID);
-  if (!/[SM]\d+A\d+D\d+/.test(link)) return null;
-  return link;
+    // listing id (várias variantes)
+    .replace(/%listingid%/gi, listingId || '0')
+    .replace(/%listing_id%/gi, listingId || '0')
+    // asset id (várias variantes)
+    .replace(/%assetid%/gi, assetId || '0')
+    .replace(/%asset_id%/gi, assetId || '0')
+    .replace(/%assetid_string%/gi, assetId || '0')
+    // owner steamid (várias variantes)
+    .replace(/%owner_steamid%/gi, STEAM_MARKET_OWNER_ID)
+    .replace(/%ownersteamid%/gi, STEAM_MARKET_OWNER_ID)
+    .replace(/%steamid%/gi, STEAM_MARKET_OWNER_ID);
+
+  const valid = /[SM]\d+A\d+D\d+/.test(link);
+  const stillHasPlaceholder = /%[a-z_]+%/i.test(link);
+  return {
+    link: valid ? link : null,
+    raw: rawLink,
+    substituted: link,
+    valid,
+    stillHasPlaceholder,
+    error: valid ? null : (stillHasPlaceholder ? 'unsubstituted_placeholder' : 'pattern_mismatch'),
+  };
 }
 
 // ───── Estratégia 1: endpoint /render JSON ─────
@@ -117,12 +133,19 @@ async function tryRenderEndpoint(skinName, diag) {
     diag.push({ step: 'render_no_inspect_action', actionsCount: allActions.length });
     return null;
   }
-  const inspectLink = normalizeInspectLink(inspectAction.link, listingId, assetId);
-  if (!inspectLink) {
-    diag.push({ step: 'render_invalid_link', preview: inspectAction.link?.slice(0, 100) });
+  const norm = normalizeInspectLink(inspectAction.link, listingId, assetId);
+  if (!norm.link) {
+    diag.push({
+      step: 'render_invalid_link',
+      error: norm.error,
+      raw: norm.raw,
+      substituted: norm.substituted,
+      listingId,
+      assetId,
+    });
     return null;
   }
-  return { inspectLink, listingId, assetId, source: 'steam_market_render' };
+  return { inspectLink: norm.link, listingId, assetId, source: 'steam_market_render' };
 }
 
 // ───── Estratégia 2: scrape do HTML da página da listagem ─────
@@ -167,21 +190,23 @@ async function tryHtmlScrape(skinName, diag) {
   }
 
   // Pega o primeiro listing válido com inspect action
+  const failures = [];
   for (const [listingId, listing] of Object.entries(listingsObj)) {
     const aId = listing?.asset?.id;
-    if (!aId) continue;
+    if (!aId) { failures.push({ listingId, reason: 'no_asset_id' }); continue; }
     const asset = ctxAssets[aId];
-    if (!asset) continue;
+    if (!asset) { failures.push({ listingId, aId, reason: 'no_asset_in_ctx' }); continue; }
     const allActions = [
       ...(asset.market_actions || []),
       ...(asset.actions || []),
     ];
     const inspectAction = allActions.find(a => a?.link && a.link.includes('+csgo_econ_action_preview'));
-    if (!inspectAction) continue;
-    const inspectLink = normalizeInspectLink(inspectAction.link, listingId, aId);
-    if (inspectLink) {
-      return { inspectLink, listingId, assetId: aId, source: 'steam_market_html' };
+    if (!inspectAction) { failures.push({ listingId, aId, reason: 'no_inspect_action', actionsCount: allActions.length }); continue; }
+    const norm = normalizeInspectLink(inspectAction.link, listingId, aId);
+    if (norm.link) {
+      return { inspectLink: norm.link, listingId, assetId: aId, source: 'steam_market_html' };
     }
+    failures.push({ listingId, aId, reason: 'norm_failed', error: norm.error, raw: norm.raw, substituted: norm.substituted });
   }
 
   // Se não achou via listingsObj, tenta o primeiro asset direto
@@ -192,13 +217,18 @@ async function tryHtmlScrape(skinName, diag) {
     ];
     const inspectAction = allActions.find(a => a?.link && a.link.includes('+csgo_econ_action_preview'));
     if (!inspectAction) continue;
-    const inspectLink = normalizeInspectLink(inspectAction.link, '0', aId);
-    if (inspectLink) {
-      return { inspectLink, listingId: '0', assetId: aId, source: 'steam_market_html_fallback' };
+    const norm = normalizeInspectLink(inspectAction.link, '0', aId);
+    if (norm.link) {
+      return { inspectLink: norm.link, listingId: '0', assetId: aId, source: 'steam_market_html_fallback' };
     }
   }
 
-  diag.push({ step: 'html_no_valid_action', listingsCount: Object.keys(listingsObj).length, assetsCount: assetIds.length });
+  diag.push({
+    step: 'html_no_valid_action',
+    listingsCount: Object.keys(listingsObj).length,
+    assetsCount: assetIds.length,
+    failures: failures.slice(0, 3),
+  });
   return null;
 }
 
