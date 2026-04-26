@@ -101,14 +101,30 @@ async function findInspectLinkForSkin(skinName) {
   const listingId = listing.listingid;
   const asset = listing.asset || {};
   const assetId = asset.id;
-  const marketActions = asset.market_actions || [];
-  const inspectAction = marketActions.find(a => a.link && a.link.includes('+csgo_econ_action_preview'));
-  if (!inspectAction) return null;
+  // O inspect link pode estar em "actions" ou "market_actions" — tenta ambos.
+  const allActions = [
+    ...(asset.market_actions || []),
+    ...(asset.actions || []),
+  ];
+  const inspectAction = allActions.find(a => a?.link && a.link.includes('+csgo_econ_action_preview'));
+  if (!inspectAction) {
+    console.warn('[inspect-link] sem inspect action pra', skinName, 'asset:', JSON.stringify(asset).slice(0, 300));
+    return null;
+  }
 
-  // O `link` vem com placeholders %listingid%, %assetid% que precisam ser substituídos
+  // Placeholders comuns: %listingid%, %assetid%, %owner_steamid%, %assetid_string%
+  // Substitui TODOS os possíveis pra garantir que não sobrou %xxx% no link final.
   let inspectLink = inspectAction.link
-    .replace('%listingid%', listingId)
-    .replace('%assetid%', assetId);
+    .replace(/%listingid%/g, listingId)
+    .replace(/%assetid%/g, assetId)
+    .replace(/%assetid_string%/g, assetId)
+    .replace(/%owner_steamid%/g, '76561202255233023'); // Steam Market usa esse fixo
+
+  // Validação: link tem que ter o formato com S/M + A + D params
+  if (!/[SM]\d+A\d+D\d+/.test(inspectLink)) {
+    console.warn('[inspect-link] link mal formado pra', skinName, inspectLink.slice(0, 200));
+    return null;
+  }
 
   const result = {
     inspectLink,
