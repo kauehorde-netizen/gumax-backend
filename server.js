@@ -125,6 +125,7 @@ const subscriptionMod    = safeRequire('./functions/subscription', 'subscription
 const creditsPurchaseMod = safeRequire('./functions/credits-purchase', 'credits-purchase');
 const buybackMod         = safeRequire('./functions/buyback', 'buyback');
 const floatInspectorMod  = safeRequire('./functions/float-inspector', 'float-inspector');
+const rafflesMod         = safeRequire('./functions/raffles', 'raffles');
 
 const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
 const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
@@ -141,6 +142,7 @@ const subscriptionHandler    = subscriptionMod?.handler || disabledRoute('subscr
 const creditsPurchaseHandler = creditsPurchaseMod?.handler || disabledRoute('credits-purchase');
 const buybackHandler         = buybackMod?.handler     || disabledRoute('buyback');
 const floatInspectorHandler  = floatInspectorMod?.handler || disabledRoute('float-inspector');
+const rafflesHandler         = rafflesMod?.handler     || disabledRoute('raffles');
 // Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
 // Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
 function safeRequire(path, label) {
@@ -236,6 +238,17 @@ app.get('/api/credits/packages', rateLimit(60000, 60), wrapHandler(creditsPurcha
 app.post('/api/credits/purchase', rateLimit(60000, 20), wrapHandler(creditsPurchaseHandler));
 app.post('/api/credits/purchase/webhook', wrapHandler(creditsPurchaseHandler)); // sem rate limit — MP
 app.options('/api/credits/purchase', (req, res) => res.sendStatus(204));
+
+// ── Rifas (sistema de bilhetes com PIX MP) ──
+app.get('/api/raffles/active',     rateLimit(60000, 120), wrapHandler(rafflesHandler));
+app.get('/api/raffles/history',    rateLimit(60000, 60),  wrapHandler(rafflesHandler));
+app.get('/api/raffles/my-tickets', rateLimit(60000, 60),  wrapHandler(rafflesHandler));
+app.post('/api/raffles/buy',       rateLimit(60000, 20),  wrapHandler(rafflesHandler));
+app.post('/api/raffles/webhook',   wrapHandler(rafflesHandler)); // sem rate limit — MP
+app.post('/api/raffles/admin/create', rateLimit(60000, 5), wrapHandler(rafflesHandler));
+app.post('/api/raffles/admin/draw',   rateLimit(60000, 5), wrapHandler(rafflesHandler));
+app.post('/api/raffles/admin/cancel', rateLimit(60000, 5), wrapHandler(rafflesHandler));
+app.options('/api/raffles/*', (req, res) => res.sendStatus(204));
 
 // ── Pricempire API (fonte canônica de preços, base Youpin) ──
 app.get('/api/pricempire/items', rateLimit(60000, 20), wrapHandler(pricempireHandler));
