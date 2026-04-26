@@ -6,8 +6,12 @@
 //
 // Endpoint:
 //   GET /api/inspect-link?name=AK-47%20|%20Redline%20(Field-Tested)
-//     → { inspectLink: "steam://...", source: "steam_market", listingId, assetId }
-//     → { error: "not_found" } se não houver listagens
+//     → { inspectLink: "steam://...", source: "steam_market_render|steam_market_html|cache", listingId, assetId }
+//     → { error: "not_found", diag: [...] } se nenhuma estratégia retornou link
+//
+// Estratégias (em ordem):
+//   1) GET /market/listings/730/{name}/render/  → JSON com listinginfo + assets
+//   2) GET /market/listings/730/{name}          → HTML, extrai g_rgAssets/g_rgListingInfo via regex
 //
 // Cache 1h no Firestore (steam_market_cache/inspect:<name>) — Steam Market tem
 // rate limit cruel e essas listagens não mudam de minuto em minuto.
@@ -16,6 +20,7 @@ const admin = require('firebase-admin');
 const https = require('https');
 
 const CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+const STEAM_MARKET_OWNER_ID = '76561202255233023'; // Steam Market usa esse SteamID fixo nos inspect links
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -33,33 +38,168 @@ function httpsGet(url, opts = {}) {
     const req = https.get(url, {
       timeout,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'identity', // sem gzip pra simplificar parsing
+        'Cache-Control': 'no-cache',
         ...(opts.headers || {}),
       },
     }, (res) => {
       let body = '';
       res.on('data', c => body += c);
-      res.on('end', () => resolve({ status: res.statusCode, body }));
+      res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
   });
 }
 
-// Constrói URL steam:// pra abrir o cliente Steam local com inspect.
-//
-// Steam Market listings têm formato:
-//   steam://rungame/730/76561202255233023/+csgo_econ_action_preview%20M<listingId>A<assetId>D<paramD>
-//
-// Onde:
-//   - 76561202255233023 é o "session_steamid" (constante do CS2 no Steam Market)
-//   - M = marker pra "market listing" (em vez de S = inventory)
-//   - listingId = o ID da listagem
-//   - assetId = o ID do asset
-//   - D = "param d" — assinatura, vem no JSON da Steam
-function buildInspectUrlFromMarket(listingId, assetId, paramD) {
-  return `steam://rungame/730/76561202255233023/+csgo_econ_action_preview%20M${listingId}A${assetId}D${paramD}`;
+// Substitui placeholders comuns e valida formato.
+// Retorna null se o link não tem o pattern S/M+A+D necessário.
+function normalizeInspectLink(rawLink, listingId, assetId) {
+  if (!rawLink) return null;
+  let link = rawLink
+    .replace(/%listingid%/g, listingId || '0')
+    .replace(/%assetid%/g, assetId || '0')
+    .replace(/%assetid_string%/g, assetId || '0')
+    .replace(/%owner_steamid%/g, STEAM_MARKET_OWNER_ID);
+  if (!/[SM]\d+A\d+D\d+/.test(link)) return null;
+  return link;
+}
+
+// ───── Estratégia 1: endpoint /render JSON ─────
+async function tryRenderEndpoint(skinName, diag) {
+  const encoded = encodeURIComponent(skinName);
+  // URL que o Steam Market real usa (com trailing slash em /render/ e params completos):
+  const url = `https://steamcommunity.com/market/listings/730/${encoded}/render/?query=&start=0&count=1&country=US&language=english&currency=1`;
+  diag.push({ step: 'render_request', url });
+  let res;
+  try {
+    res = await httpsGet(url, {
+      timeout: 8000,
+      headers: { 'Accept': 'application/json, text/javascript, */*; q=0.01', 'X-Requested-With': 'XMLHttpRequest' },
+    });
+  } catch (e) {
+    diag.push({ step: 'render_network_error', error: e.message });
+    return null;
+  }
+  diag.push({ step: 'render_response', status: res.status, bodyLen: res.body?.length || 0 });
+  if (res.status !== 200) {
+    if (res.status === 429) diag.push({ step: 'render_rate_limited' });
+    return null;
+  }
+  let data;
+  try { data = JSON.parse(res.body); } catch (e) {
+    diag.push({ step: 'render_parse_fail', preview: res.body?.slice(0, 200) });
+    return null;
+  }
+  if (!data.success) {
+    diag.push({ step: 'render_not_success', success: data.success });
+    return null;
+  }
+  const listings = data.listinginfo || {};
+  const firstKey = Object.keys(listings)[0];
+  if (!firstKey) {
+    diag.push({ step: 'render_no_listings' });
+    return null;
+  }
+  const listing = listings[firstKey];
+  const listingId = listing.listingid || firstKey;
+  const asset = listing.asset || {};
+  const assetId = asset.id;
+  const allActions = [
+    ...(asset.market_actions || []),
+    ...(asset.actions || []),
+  ];
+  const inspectAction = allActions.find(a => a?.link && a.link.includes('+csgo_econ_action_preview'));
+  if (!inspectAction) {
+    diag.push({ step: 'render_no_inspect_action', actionsCount: allActions.length });
+    return null;
+  }
+  const inspectLink = normalizeInspectLink(inspectAction.link, listingId, assetId);
+  if (!inspectLink) {
+    diag.push({ step: 'render_invalid_link', preview: inspectAction.link?.slice(0, 100) });
+    return null;
+  }
+  return { inspectLink, listingId, assetId, source: 'steam_market_render' };
+}
+
+// ───── Estratégia 2: scrape do HTML da página da listagem ─────
+async function tryHtmlScrape(skinName, diag) {
+  const encoded = encodeURIComponent(skinName);
+  const url = `https://steamcommunity.com/market/listings/730/${encoded}`;
+  diag.push({ step: 'html_request', url });
+  let res;
+  try {
+    res = await httpsGet(url, { timeout: 10000 });
+  } catch (e) {
+    diag.push({ step: 'html_network_error', error: e.message });
+    return null;
+  }
+  diag.push({ step: 'html_response', status: res.status, bodyLen: res.body?.length || 0 });
+  if (res.status !== 200) return null;
+
+  // Extrai g_rgAssets — contém actions/market_actions com inspect link template.
+  // Formato: g_rgAssets = { "730": { "2": { "<assetId>": {...} } } };
+  const assetsMatch = res.body.match(/g_rgAssets\s*=\s*(\{[\s\S]*?\});/);
+  if (!assetsMatch) {
+    diag.push({ step: 'html_no_g_rgAssets' });
+    return null;
+  }
+  let assetsObj;
+  try { assetsObj = JSON.parse(assetsMatch[1]); } catch (e) {
+    diag.push({ step: 'html_assets_parse_fail', error: e.message });
+    return null;
+  }
+  const ctxAssets = assetsObj?.['730']?.['2'] || {};
+  const assetIds = Object.keys(ctxAssets);
+  if (!assetIds.length) {
+    diag.push({ step: 'html_no_assets' });
+    return null;
+  }
+
+  // Extrai g_rgListingInfo — mapeia listingId → assetId
+  const listingsMatch = res.body.match(/g_rgListingInfo\s*=\s*(\{[\s\S]*?\});/);
+  let listingsObj = {};
+  if (listingsMatch) {
+    try { listingsObj = JSON.parse(listingsMatch[1]); } catch {}
+  }
+
+  // Pega o primeiro listing válido com inspect action
+  for (const [listingId, listing] of Object.entries(listingsObj)) {
+    const aId = listing?.asset?.id;
+    if (!aId) continue;
+    const asset = ctxAssets[aId];
+    if (!asset) continue;
+    const allActions = [
+      ...(asset.market_actions || []),
+      ...(asset.actions || []),
+    ];
+    const inspectAction = allActions.find(a => a?.link && a.link.includes('+csgo_econ_action_preview'));
+    if (!inspectAction) continue;
+    const inspectLink = normalizeInspectLink(inspectAction.link, listingId, aId);
+    if (inspectLink) {
+      return { inspectLink, listingId, assetId: aId, source: 'steam_market_html' };
+    }
+  }
+
+  // Se não achou via listingsObj, tenta o primeiro asset direto
+  for (const [aId, asset] of Object.entries(ctxAssets)) {
+    const allActions = [
+      ...(asset.market_actions || []),
+      ...(asset.actions || []),
+    ];
+    const inspectAction = allActions.find(a => a?.link && a.link.includes('+csgo_econ_action_preview'));
+    if (!inspectAction) continue;
+    const inspectLink = normalizeInspectLink(inspectAction.link, '0', aId);
+    if (inspectLink) {
+      return { inspectLink, listingId: '0', assetId: aId, source: 'steam_market_html_fallback' };
+    }
+  }
+
+  diag.push({ step: 'html_no_valid_action', listingsCount: Object.keys(listingsObj).length, assetsCount: assetIds.length });
+  return null;
 }
 
 async function findInspectLinkForSkin(skinName) {
@@ -78,62 +218,22 @@ async function findInspectLinkForSkin(skinName) {
     }
   } catch {}
 
-  // Busca a primeira listagem real no Steam Market
-  const encoded = encodeURIComponent(skinName);
-  const url = `https://steamcommunity.com/market/listings/730/${encoded}/render?currency=7&start=0&count=1&format=json&country=BR`;
-  const res = await httpsGet(url, { timeout: 8000 });
-  if (res.status !== 200) {
-    if (res.status === 429) throw new Error('Steam rate limited — tente em alguns minutos');
-    if (res.status === 404) return null; // skin não tem listings no Market
-    throw new Error(`Steam Market HTTP ${res.status}`);
-  }
-  let data;
-  try { data = JSON.parse(res.body); } catch { return null; }
-  if (!data.success) return null;
+  const diag = [];
 
-  // Estrutura da resposta:
-  //   listinginfo: { "<listingId>": { listingid, asset: { id, market_actions: [{ link: "..." }] } } }
-  //   assets: { "730": { "2": { "<assetId>": { ... } } } }
-  const listings = data.listinginfo || {};
-  const firstKey = Object.keys(listings)[0];
-  if (!firstKey) return null;
-  const listing = listings[firstKey];
-  const listingId = listing.listingid;
-  const asset = listing.asset || {};
-  const assetId = asset.id;
-  // O inspect link pode estar em "actions" ou "market_actions" — tenta ambos.
-  const allActions = [
-    ...(asset.market_actions || []),
-    ...(asset.actions || []),
-  ];
-  const inspectAction = allActions.find(a => a?.link && a.link.includes('+csgo_econ_action_preview'));
-  if (!inspectAction) {
-    console.warn('[inspect-link] sem inspect action pra', skinName, 'asset:', JSON.stringify(asset).slice(0, 300));
-    return null;
+  // Estratégia 1: endpoint /render
+  let result = await tryRenderEndpoint(skinName, diag);
+
+  // Estratégia 2: HTML scrape (se /render falhar)
+  if (!result) {
+    result = await tryHtmlScrape(skinName, diag);
   }
 
-  // Placeholders comuns: %listingid%, %assetid%, %owner_steamid%, %assetid_string%
-  // Substitui TODOS os possíveis pra garantir que não sobrou %xxx% no link final.
-  let inspectLink = inspectAction.link
-    .replace(/%listingid%/g, listingId)
-    .replace(/%assetid%/g, assetId)
-    .replace(/%assetid_string%/g, assetId)
-    .replace(/%owner_steamid%/g, '76561202255233023'); // Steam Market usa esse fixo
-
-  // Validação: link tem que ter o formato com S/M + A + D params
-  if (!/[SM]\d+A\d+D\d+/.test(inspectLink)) {
-    console.warn('[inspect-link] link mal formado pra', skinName, inspectLink.slice(0, 200));
-    return null;
+  if (!result) {
+    console.warn('[inspect-link] todas estratégias falharam pra', skinName, JSON.stringify(diag));
+    return { error: 'not_found', diag };
   }
 
-  const result = {
-    inspectLink,
-    listingId,
-    assetId,
-    source: 'steam_market',
-    cachedAt: Date.now(),
-  };
-
+  result.cachedAt = Date.now();
   // Salva cache (best-effort)
   try { await cacheRef.set(result); } catch {}
   return result;
@@ -148,10 +248,12 @@ exports.handler = async (event) => {
 
   try {
     const result = await findInspectLinkForSkin(name);
-    if (!result) return json(404, { error: 'not_found', message: 'Sem listagens no Steam Market pra esta skin' });
+    if (result?.error) {
+      return json(404, { error: 'not_found', message: 'Sem listagens no Steam Market pra esta skin', diag: result.diag });
+    }
     return json(200, result);
   } catch (e) {
-    console.error('[inspect-link]', e.message);
+    console.error('[inspect-link]', e.message, e.stack);
     return json(500, { error: 'server_error', message: e.message });
   }
 };
