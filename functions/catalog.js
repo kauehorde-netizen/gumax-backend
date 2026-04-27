@@ -3,7 +3,8 @@
 // Suporta filtros: category, search, priceRange, deliveryType.
 // Suporta ordenação: price, name, discount.
 
-const { fetchPricempireItems, getYoupinPrice, buildIconUrl } = require('./pricempire');
+// Migrado pra CSPriceAPI (Trader Pro). Mesma signature exportada.
+const { fetchPricempireItems, getYoupinPrice, buildIconUrl } = require('./cspriceapi');
 
 // Cotação CNY→BRL (Pricempire retorna em CNY)
 async function fetchExchangeRate() {
