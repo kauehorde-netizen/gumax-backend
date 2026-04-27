@@ -155,7 +155,13 @@ function safeRequire(path, label) {
     return null;
   }
 }
-const pricempireMod     = safeRequire('./functions/pricempire', 'pricempire');
+// MIGRAÇÃO: pricempire.js → cspriceapi.js (CSPriceAPI Trader Pro).
+// O cspriceapi.js exporta as MESMAS funções que pricempire.js (getTopSellers,
+// getPricempireItem, etc) + novas Pro features (float-ranged, buyorder, analyzeOverpay).
+// Tenta carregar cspriceapi primeiro; se falhar (ex: arquivo não deployado ainda),
+// cai pra pricempire pra rollback automático.
+const cspriceMod        = safeRequire('./functions/cspriceapi', 'cspriceapi');
+const pricempireMod     = cspriceMod || safeRequire('./functions/pricempire', 'pricempire');
 const steamMarketMod    = safeRequire('./functions/steam-market', 'steam-market');
 const priceHistoryMod   = safeRequire('./functions/price-history', 'price-history');
 const steamInventoryMod = safeRequire('./functions/steam-inventory', 'steam-inventory');
@@ -257,12 +263,16 @@ app.options('/api/raffles/*', (req, res) => res.sendStatus(204));
 // ── Inspect link resolver (busca link genérico do Steam Market pra skins sem ownership) ──
 app.get('/api/inspect-link', rateLimit(60000, 30), wrapHandler(inspectLinkHandler));
 
-// ── Pricempire API (fonte canônica de preços, base Youpin) ──
+// ── Pricempire API (rotas mantidas, fonte canônica é cspriceapi.js agora) ──
 app.get('/api/pricempire/items', rateLimit(60000, 20), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/suggest', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/search', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/by-category', rateLimit(60000, 30), wrapHandler(pricempireHandler));
 app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+// Trader Pro features (CSPriceAPI): float ranged + youpin buyorder + análise overpay
+app.get('/api/pricempire/float-ranged', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+app.get('/api/pricempire/buyorder', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+app.post('/api/pricempire/analyze-overpay', rateLimit(60000, 30), wrapHandler(pricempireHandler));
 
 // Float inspector (float exato + pattern via SteamWebAPI.com)
 app.get('/api/inspect-float', rateLimit(60000, 60), wrapHandler(floatInspectorHandler));
