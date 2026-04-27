@@ -72,6 +72,47 @@ async function requireUser(event) {
   }
 }
 
+// ── Libera tickets `pending` cujo `pendingExpiresAt` já passou. Decrementa
+//    `reservedTickets` da rifa pra liberar os números pra outros clientes.
+//    Chamada antes de qualquer leitura/escrita do grid pra manter consistência.
+//    Idempotente — pode rodar várias vezes sem efeito colateral.
+async function releaseExpiredTickets(raffleId = 'active') {
+  const db = admin.firestore();
+  const now = Date.now();
+  // Busca tickets pending da rifa específica. Filtro por pendingExpiresAt
+  // não pode ser inequality + outra inequality, então faz client-side.
+  const snap = await db.collection('raffleTickets')
+    .where('raffleId', '==', raffleId)
+    .where('status', '==', 'pending')
+    .get();
+
+  const expired = [];
+  snap.docs.forEach(d => {
+    const t = d.data();
+    const expiresAtMs = t.pendingExpiresAt?.toMillis ? t.pendingExpiresAt.toMillis() : (t.pendingExpiresAtMs || 0);
+    if (expiresAtMs && expiresAtMs < now) expired.push({ id: d.id, qty: t.qty || (t.ticketNumbers || []).length });
+  });
+
+  if (!expired.length) return 0;
+
+  // Marca cada um como 'expired' + decrementa reservedTickets na rifa.
+  const totalQty = expired.reduce((s, e) => s + (e.qty || 0), 0);
+  const batch = db.batch();
+  for (const e of expired) {
+    batch.update(db.collection('raffleTickets').doc(e.id), {
+      status: 'expired',
+      expiredAt: admin.firestore.FieldValue.serverTimestamp(),
+      expiredReason: 'pending_ttl_5min',
+    });
+  }
+  batch.update(db.collection('raffles').doc(raffleId), {
+    reservedTickets: admin.firestore.FieldValue.increment(-totalQty),
+  });
+  await batch.commit();
+  console.log(`[Raffles] released ${expired.length} expired tickets (${totalQty} numbers) from raffle ${raffleId}`);
+  return expired.length;
+}
+
 // ── Sorteia qty números aleatórios ENTRE 1 e totalTickets que ainda
 //    NÃO estão reservados (presentes em ticketsByNumber).
 function pickRandomNumbers(qty, totalTickets, takenSet) {
@@ -88,10 +129,19 @@ function pickRandomNumbers(qty, totalTickets, takenSet) {
   return picked.sort((a, b) => a - b);
 }
 
+// TTL da reserva: 5 min. Se o user não pagar nesse tempo, libera os números
+// pra outros. Solicitado pelo Gu pra evitar números travados sem pagamento.
+const RAFFLE_PENDING_TTL_MS = 5 * 60 * 1000;
+
 // ── Cria PIX no Mercado Pago pra cobrança de bilhetes ──
 async function createPixForRaffle({ totalBRL, description, externalRef, userEmail, metadata }) {
   const MP_TOKEN = process.env.MP_ACCESS_TOKEN;
   if (!MP_TOKEN) throw new Error('MP_ACCESS_TOKEN not configured');
+  // PIX expira em 5 min no MP também — depois disso o pagamento é rejeitado.
+  // Formato ISO-8601 com timezone offset (MP exige).
+  const expirationDate = new Date(Date.now() + RAFFLE_PENDING_TTL_MS);
+  // MP quer formato tipo "2026-04-26T20:30:00.000-03:00"
+  const isoExp = expirationDate.toISOString().replace('Z', '-00:00');
   const body = {
     transaction_amount: Math.round(totalBRL * 100) / 100,
     description,
@@ -99,6 +149,7 @@ async function createPixForRaffle({ totalBRL, description, externalRef, userEmai
     payer: { email: userEmail || 'cliente@gumaxskins.com', first_name: 'Gumax User' },
     external_reference: externalRef,
     metadata,
+    date_of_expiration: isoExp,
   };
   const resp = await fetch('https://api.mercadopago.com/v1/payments', {
     method: 'POST',
@@ -130,6 +181,12 @@ async function createPixForRaffle({ totalBRL, description, externalRef, userEmai
 // GET /api/raffles/active → retorna rifa ativa + números já tomados (pública).
 async function handleGetActive() {
   const db = admin.firestore();
+  // Antes de listar, libera tickets pending expirados (>5min sem pagar).
+  // Best-effort: se falhar, log e segue (vale a pena devolver o grid mesmo
+  // levemente stale do que travar a página inteira por causa do cleanup).
+  try { await releaseExpiredTickets('active'); }
+  catch (e) { console.warn('[Raffles] releaseExpiredTickets falhou no GetActive:', e.message); }
+
   const doc = await db.collection('raffles').doc('active').get();
   if (!doc.exists) return json(200, { active: null });
   // Pega TODOS os números já reservados/pagos pra renderizar a cartela
@@ -204,6 +261,11 @@ async function handleBuy(event) {
     });
   }
 
+  // Libera reservas expiradas ANTES da transação. Garante que números travados
+  // por usuários que abandonaram o pagamento estejam disponíveis pra esse user.
+  try { await releaseExpiredTickets('active'); }
+  catch (e) { console.warn('[Raffles] releaseExpiredTickets falhou no Buy:', e.message); }
+
   const result = await db.runTransaction(async (tx) => {
     const raffleRef = db.collection('raffles').doc('active');
     const snap = await tx.get(raffleRef);
@@ -248,6 +310,11 @@ async function handleBuy(event) {
     const totalBRL = qty * raffle.pricePerTicket;
     const ticketRef = db.collection('raffleTickets').doc();
 
+    // pendingExpiresAt: timestamp absoluto em ms. Tickets pending após esse
+    // tempo são liberados por releaseExpiredTickets. 5 min — alinhado com o
+    // date_of_expiration do PIX no MP.
+    const pendingExpiresAtMs = Date.now() + RAFFLE_PENDING_TTL_MS;
+
     tx.set(ticketRef, {
       raffleId: 'active',
       raffleSnapshot: { name: raffle.name, skinName: raffle.skinName, skinImage: raffle.skinImage },
@@ -261,6 +328,8 @@ async function handleBuy(event) {
       totalPriceBRL: totalBRL,
       status: 'pending',
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      pendingExpiresAt: admin.firestore.Timestamp.fromMillis(pendingExpiresAtMs),
+      pendingExpiresAtMs, // backup numérico pra leitura simples
     });
 
     // Reserva os números (incrementa reservedTickets pra outros não pegarem)
@@ -299,6 +368,8 @@ async function handleBuy(event) {
       qrCodeBase64: pix.qrCodeBase64,
       copyPaste: pix.copyPaste,
       paymentId: pix.paymentId,
+      // ms timestamp — frontend usa pra countdown de 5 min no modal de PIX
+      pendingExpiresAtMs: Date.now() + RAFFLE_PENDING_TTL_MS,
     });
   } catch (e) {
     // Rollback: marca ticket como expirado e devolve reservedTickets
@@ -338,6 +409,55 @@ async function handleWebhook(event) {
   if (ticket.status === 'paid') return json(200, { received: true, already: true });
 
   if (pay.status === 'approved') {
+    // Caso comum: ticket ainda pending → promove pra paid normalmente.
+    // Caso edge: ticket virou expired no meio (TTL 5min estourou MAS user
+    // pagou no MP). Nesse caso checa se os números ainda estão livres:
+    //   - Livres → promove mesmo assim (re-reserva ao pagar)
+    //   - Tomados por outro → flagra pra refund manual via admin
+    const ticketWasExpired = ticket.status === 'expired';
+
+    if (ticketWasExpired) {
+      // Verifica se algum número desse ticket já foi reservado/pago por outro
+      const sameRaffleSnap = await db.collection('raffleTickets')
+        .where('raffleId', '==', ticket.raffleId)
+        .where('status', 'in', ['paid', 'pending'])
+        .get();
+      const taken = new Set();
+      sameRaffleSnap.docs.forEach(d => {
+        if (d.id === ticketId) return;
+        const other = d.data();
+        (other.ticketNumbers || []).forEach(n => taken.add(n));
+      });
+      const conflict = (ticket.ticketNumbers || []).some(n => taken.has(n));
+      if (conflict) {
+        // Flagra pra refund manual — Gu vai precisar devolver via PIX/Stripe
+        await ticketRef.update({
+          status: 'paid_after_expire_conflict',
+          paymentStatus: pay.status,
+          needsManualRefund: true,
+          paidAt: admin.firestore.FieldValue.serverTimestamp(),
+          conflictNote: 'User pagou após TTL 5min e números já tomados por outro. Refund manual.',
+        });
+        console.warn(`[Raffles] CONFLITO: ticket ${ticketId} pagou tarde, números tomados. Refund manual!`);
+        return json(200, { received: true, conflict: true });
+      }
+      // Sem conflito — promove pra paid + re-reserva
+      await db.runTransaction(async (tx) => {
+        tx.update(ticketRef, {
+          status: 'paid',
+          paidAt: admin.firestore.FieldValue.serverTimestamp(),
+          paymentStatus: pay.status,
+          paidAfterExpire: true,
+        });
+        tx.update(db.collection('raffles').doc(ticket.raffleId || 'active'), {
+          soldTickets: admin.firestore.FieldValue.increment(ticket.qty),
+          // reservedTickets não muda — já foi decrementado quando expirou
+        });
+      });
+      return json(200, { received: true, paid: true, latePaid: true });
+    }
+
+    // Caminho normal — pending → paid
     await db.runTransaction(async (tx) => {
       tx.update(ticketRef, {
         status: 'paid',
