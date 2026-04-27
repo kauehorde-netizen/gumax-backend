@@ -4,7 +4,8 @@
 //   • Pricempire (primary, CNY — fonte canônica, Youpin-base)
 //   • Steam Market (complementar, BRL — cache 24h)
 
-const { getPricempireItem, getYoupinPrice, buildIconUrl } = require('./pricempire');
+// Migrado pra CSPriceAPI (Trader Pro). Mesma signature exportada.
+const { getPricempireItem, getYoupinPrice, buildIconUrl } = require('./cspriceapi');
 const { getSteamPrice } = require('./steam-market');
 
 function rd(val) {
