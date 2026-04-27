@@ -34,7 +34,19 @@
 //   createdAt, finishedAt
 
 const admin = require('firebase-admin');
-const { verifyIdToken } = require('./steam-auth');
+
+// Helper local pra verificar Firebase ID token (mesmo padrão de credits/raffles).
+async function verifyIdToken(headers) {
+  const auth = headers?.authorization || headers?.Authorization;
+  if (!auth || !auth.toLowerCase().startsWith('bearer ')) return null;
+  const token = auth.slice(7);
+  try {
+    return await admin.auth().verifyIdToken(token);
+  } catch (e) {
+    console.log('[Match] ID token verify failed:', e.message);
+    return null;
+  }
+}
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
