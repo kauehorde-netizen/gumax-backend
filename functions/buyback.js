@@ -30,9 +30,9 @@ function json(code, body) {
   return { statusCode: code, headers: CORS, body: JSON.stringify(body) };
 }
 
-// Busca dados de preço de um item no Pricempire
+// Busca dados de preço de um item no CSPriceAPI (era Pricempire)
 async function getItemPrices(marketHashName) {
-  const { getPricempireItem } = require('./pricempire');
+  const { getPricempireItem } = require('./cspriceapi');
   return getPricempireItem(marketHashName);
 }
 
@@ -42,7 +42,7 @@ async function quoteItem(marketHashName) {
   const item = await getItemPrices(marketHashName);
   if (!item) return null;
 
-  const { buildIconUrl } = require('./pricempire');
+  const { buildIconUrl } = require('./cspriceapi');
   const { getBaseFactor: getBaseFactorPricing } = require('./pricing');
 
   // Helper defensivo — aceita número ou objeto {price, count}
@@ -122,7 +122,7 @@ async function createTransaction(payload, auth) {
   if (target && target.length) {
     // Pro target usamos o preço DE VENDA da loja (getConversionFactor + pricing config)
     const { getConversionFactor, applyPricing } = require('./pricing');
-    const { getYoupinPrice } = require('./pricempire');
+    const { getYoupinPrice } = require('./cspriceapi');
     const saleFactor = await getConversionFactor();
     for (const t of target) {
       const it = await getItemPrices(t.name);
@@ -133,7 +133,7 @@ async function createTransaction(payload, auth) {
         name: it.market_hash_name || t.name,
         youpinCNY,
         saleBRL,
-        iconUrl: require('./pricempire').buildIconUrl(it.icon),
+        iconUrl: require('./cspriceapi').buildIconUrl(it.icon),
       });
       targetTotalBRL += saleBRL;
     }
