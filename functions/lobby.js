@@ -30,7 +30,20 @@
 //   POST   /:id/decline-challenge
 
 const admin = require('firebase-admin');
-const { verifyIdToken } = require('./steam-auth');
+
+// Helper local pra verificar Firebase ID token. Mesmo padrão usado em
+// credits.js / raffles.js / analysis.js (steam-auth.js NÃO exporta esse helper).
+async function verifyIdToken(headers) {
+  const auth = headers?.authorization || headers?.Authorization;
+  if (!auth || !auth.toLowerCase().startsWith('bearer ')) return null;
+  const token = auth.slice(7);
+  try {
+    return await admin.auth().verifyIdToken(token);
+  } catch (e) {
+    console.log('[Lobby] ID token verify failed:', e.message);
+    return null;
+  }
+}
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
