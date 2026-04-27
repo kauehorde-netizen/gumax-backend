@@ -110,7 +110,10 @@ async function handleCreate(event) {
   const name = (body.name || `Sala do ${user.name}`).slice(0, 40);
 
   const lobbyRef = db.collection('lobbies').doc();
-  const slot0 = { uid: user.uid, steamId: user.steamId, name: user.name, avatar: user.avatar, joinedAt: admin.firestore.FieldValue.serverTimestamp() };
+  // Timestamp.now() em vez de FieldValue.serverTimestamp() porque o slot vai
+  // dentro de um ARRAY — Firestore não permite serverTimestamp dentro de array
+  // elements ("FieldValue.serverTimestamp() cannot be used inside of an array").
+  const slot0 = { uid: user.uid, steamId: user.steamId, name: user.name, avatar: user.avatar, joinedAt: admin.firestore.Timestamp.now() };
   await lobbyRef.set({
     name,
     ownerId: user.uid,
