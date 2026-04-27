@@ -128,6 +128,7 @@ const floatInspectorMod  = safeRequire('./functions/float-inspector', 'float-ins
 const rafflesMod         = safeRequire('./functions/raffles', 'raffles');
 const inspectLinkMod     = safeRequire('./functions/inspect-link', 'inspect-link');
 const lobbyMod           = safeRequire('./functions/lobby', 'lobby');
+const matchMod           = safeRequire('./functions/match', 'match');
 
 const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
 const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
@@ -147,6 +148,7 @@ const floatInspectorHandler  = floatInspectorMod?.handler || disabledRoute('floa
 const rafflesHandler         = rafflesMod?.handler     || disabledRoute('raffles');
 const inspectLinkHandler     = inspectLinkMod?.handler || disabledRoute('inspect-link');
 const lobbyHandler           = lobbyMod?.handler       || disabledRoute('lobby');
+const matchHandler           = matchMod?.handler       || disabledRoute('match');
 // Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
 // Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
 function safeRequire(path, label) {
@@ -276,6 +278,14 @@ app.post('/api/lobby/:id/challenge',     rateLimit(60000, 20), wrapHandler(lobby
 app.post('/api/lobby/:id/accept-challenge',  rateLimit(60000, 20), wrapHandler(lobbyHandler));
 app.post('/api/lobby/:id/decline-challenge', rateLimit(60000, 20), wrapHandler(lobbyHandler));
 app.options('/api/lobby/*', (req, res) => res.sendStatus(204));
+
+// ── Match (após desafio aceito) ──
+app.post('/api/match/webhook',  rateLimit(60000, 60),  wrapHandler(matchHandler)); // sem auth — secret no header
+app.get('/api/match/ranking',   rateLimit(60000, 60),  wrapHandler(matchHandler));
+app.get('/api/match/:id',       rateLimit(60000, 120), wrapHandler(matchHandler));
+app.post('/api/match/:id/confirm', rateLimit(60000, 30), wrapHandler(matchHandler));
+app.post('/api/match/:id/veto',    rateLimit(60000, 30), wrapHandler(matchHandler));
+app.options('/api/match/*', (req, res) => res.sendStatus(204));
 
 // ── Inspect link resolver (busca link genérico do Steam Market pra skins sem ownership) ──
 app.get('/api/inspect-link', rateLimit(60000, 30), wrapHandler(inspectLinkHandler));
