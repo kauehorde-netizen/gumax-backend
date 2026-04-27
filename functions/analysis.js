@@ -20,7 +20,8 @@
 
 const admin = require('firebase-admin');
 const { consume } = require('./credits');
-const { getPricempireItem, getYoupinPrice, buildIconUrl } = require('./pricempire');
+// Migrado pra CSPriceAPI (Trader Pro). Mesma signature exportada.
+const { getPricempireItem, getYoupinPrice, buildIconUrl } = require('./cspriceapi');
 const { getSteamPrice } = require('./steam-market');
 const { getHistoryForSkin, classifyInternalTrend } = require('./price-history');
 
