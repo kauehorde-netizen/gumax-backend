@@ -25,7 +25,8 @@ async function fetchYoupinTopSellers(limit = 50) {
   }
 
   try {
-    const { getTopSellers } = require('./pricempire');
+    // Migrado pra CSPriceAPI (mesma signature). Pricempire descontinuado.
+    const { getTopSellers } = require('./cspriceapi');
     const top = await getTopSellers(limit);
     // Inclui saleBRL/originalBRL que o pricempire já calcula com a config de pricing.
     // Frontend usa esses valores pra exibir preço final + strikethrough.
