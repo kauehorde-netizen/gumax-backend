@@ -18,7 +18,8 @@
 
 const admin = require('firebase-admin');
 const https = require('https');
-const { fetchPricempireItems, getYoupinPrice } = require('./pricempire');
+// Migrado pra CSPriceAPI (Trader Pro). Mesma signature exportada.
+const { fetchPricempireItems, getYoupinPrice } = require('./cspriceapi');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
