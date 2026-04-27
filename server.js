@@ -127,6 +127,7 @@ const buybackMod         = safeRequire('./functions/buyback', 'buyback');
 const floatInspectorMod  = safeRequire('./functions/float-inspector', 'float-inspector');
 const rafflesMod         = safeRequire('./functions/raffles', 'raffles');
 const inspectLinkMod     = safeRequire('./functions/inspect-link', 'inspect-link');
+const lobbyMod           = safeRequire('./functions/lobby', 'lobby');
 
 const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
 const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
@@ -145,6 +146,7 @@ const buybackHandler         = buybackMod?.handler     || disabledRoute('buyback
 const floatInspectorHandler  = floatInspectorMod?.handler || disabledRoute('float-inspector');
 const rafflesHandler         = rafflesMod?.handler     || disabledRoute('raffles');
 const inspectLinkHandler     = inspectLinkMod?.handler || disabledRoute('inspect-link');
+const lobbyHandler           = lobbyMod?.handler       || disabledRoute('lobby');
 // Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
 // Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
 function safeRequire(path, label) {
@@ -259,6 +261,21 @@ app.post('/api/raffles/admin/create', rateLimit(60000, 5), wrapHandler(rafflesHa
 app.post('/api/raffles/admin/draw',   rateLimit(60000, 5), wrapHandler(rafflesHandler));
 app.post('/api/raffles/admin/cancel', rateLimit(60000, 5), wrapHandler(rafflesHandler));
 app.options('/api/raffles/*', (req, res) => res.sendStatus(204));
+
+// ── Lobby (matchmaker entre amigos — sala 5 slots, desafio, match) ──
+// Todas as rotas auth-gated (login Steam obrigatório). Polling ~3s no frontend.
+app.get('/api/lobby/list',  rateLimit(60000, 60), wrapHandler(lobbyHandler));
+app.get('/api/lobby/mine',  rateLimit(60000, 60), wrapHandler(lobbyHandler));
+app.post('/api/lobby/create', rateLimit(60000, 10), wrapHandler(lobbyHandler));
+// Rotas com :id — Express precisa pattern explícito pra wrapHandler funcionar
+app.get('/api/lobby/:id',                rateLimit(60000, 120), wrapHandler(lobbyHandler));
+app.post('/api/lobby/:id/join',          rateLimit(60000, 30), wrapHandler(lobbyHandler));
+app.post('/api/lobby/:id/leave',         rateLimit(60000, 30), wrapHandler(lobbyHandler));
+app.post('/api/lobby/:id/kick',          rateLimit(60000, 20), wrapHandler(lobbyHandler));
+app.post('/api/lobby/:id/challenge',     rateLimit(60000, 20), wrapHandler(lobbyHandler));
+app.post('/api/lobby/:id/accept-challenge',  rateLimit(60000, 20), wrapHandler(lobbyHandler));
+app.post('/api/lobby/:id/decline-challenge', rateLimit(60000, 20), wrapHandler(lobbyHandler));
+app.options('/api/lobby/*', (req, res) => res.sendStatus(204));
 
 // ── Inspect link resolver (busca link genérico do Steam Market pra skins sem ownership) ──
 app.get('/api/inspect-link', rateLimit(60000, 30), wrapHandler(inspectLinkHandler));
