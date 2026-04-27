@@ -10,7 +10,8 @@
 //   - Endpoint GET /api/price-history?name=X&days=30 reconstrói a série.
 
 const admin = require('firebase-admin');
-const { fetchPricempireItems, getYoupinPrice } = require('./pricempire');
+// Migrado pra CSPriceAPI (Trader Pro). Mesma signature exportada.
+const { fetchPricempireItems, getYoupinPrice } = require('./cspriceapi');
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
