@@ -165,11 +165,12 @@ async function handleVeto(event, matchId) {
     const expectedTurn = VETO_SEQUENCE[turn];
     if (expectedTurn.team !== userTeam) throw new Error('not_your_turn');
 
-    const remainingPool = (veto.pool || []).filter(m => !veto.actions.some(a => a.map === m));
+    const prevActions = veto.actions || [];
+    const remainingPool = (veto.pool || []).filter(m => !prevActions.some(a => a.map === m));
     if (!remainingPool.includes(body.map)) throw new Error('map_not_available');
 
     const newActions = [
-      ...(veto.actions || []),
+      ...prevActions,
       { team: userTeam, action: expectedTurn.action, map: body.map, at: Date.now() },
     ];
     const newTurn = turn + 1;
