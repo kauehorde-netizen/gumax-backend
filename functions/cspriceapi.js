@@ -847,6 +847,95 @@ async function analyzeOverpay({ name, floatValue, askingPriceCNY }) {
 }
 
 // ── Handler HTTP (rotas mantidas: /api/pricempire/*) ──────────────────────
+// ═══ BLUEGEM SALES — histórico de vendas por pattern (CSPriceAPI Pro feature) ═══
+//
+// Endpoint do CSPriceAPI: GET /v1/bluegem-sales?market_hash_name=X&pattern=Y
+// Aceita name COM ou SEM wear:
+//   - "AK-47 | Case Hardened" + pattern=661 → todas as wears
+//   - "AK-47 | Case Hardened (Minimal Wear)" + pattern=661 → só essa wear
+//
+// Resposta:
+//   { market_hash_name, pattern, count, data: [
+//       { id, market_hash_name, item_name, pattern, floatvalue, market,
+//         sale_price_cents, price_currency_code, transacted_at_ep,
+//         transacted_at, record_type } ...
+//     ]
+//   }
+//
+// Útil principalmente pra Case Hardened (bluegems), Marble Fade, Crimson Web,
+// Doppler — skins onde o PATTERN dita o preço (variação de até 20x).
+//
+// Cache: 6h TTL no Firestore (vendas históricas mudam pouco).
+const BLUEGEM_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const _bluegemMemCache = new Map(); // key = name|pattern
+
+async function getBluegemSales(marketHashName, pattern) {
+  if (!marketHashName) return null;
+  const key = `${marketHashName}|${pattern || ''}`;
+  const now = Date.now();
+
+  // Mem cache primeiro (mesma instância)
+  const mem = _bluegemMemCache.get(key);
+  if (mem && (now - mem.fetchedAt) < BLUEGEM_CACHE_TTL_MS) return mem.data;
+
+  // Firestore cache (sobrevive restart do servidor)
+  try {
+    const docId = key.replace(/[/\\#?\[\]]/g, '_').slice(0, 1500);
+    const fsRef = require('firebase-admin').firestore().collection('cspriceCache').doc('bluegem').collection('sales').doc(docId);
+    const snap = await fsRef.get();
+    if (snap.exists) {
+      const cached = snap.data();
+      if (cached.fetchedAt && (now - cached.fetchedAt) < BLUEGEM_CACHE_TTL_MS) {
+        _bluegemMemCache.set(key, { data: cached.data, fetchedAt: cached.fetchedAt });
+        return cached.data;
+      }
+    }
+  } catch (e) { /* sem cache disponível, segue */ }
+
+  // Busca da API
+  const apiKey = process.env.CSPRICEAPI_KEY;
+  if (!apiKey) {
+    console.warn('[bluegem] CSPRICEAPI_KEY ausente');
+    return null;
+  }
+  const url = `https://api.cspriceapi.com/v1/bluegem-sales?market_hash_name=${encodeURIComponent(marketHashName)}${pattern ? `&pattern=${encodeURIComponent(pattern)}` : ''}`;
+  try {
+    const raw = await httpsGet(url, apiKey);
+    const parsed = JSON.parse(raw);
+    // Normaliza: ordena por data desc, calcula price em USD (cents → dollars)
+    const sales = (parsed.data || []).map(s => ({
+      id: s.id,
+      pattern: s.pattern,
+      floatvalue: s.floatvalue ? parseFloat(s.floatvalue) : null,
+      market: s.market,
+      priceUSD: s.sale_price_cents ? s.sale_price_cents / 100 : null,
+      currency: s.price_currency_code || 'USD',
+      transactedAt: s.transacted_at,
+      transactedAtEp: s.transacted_at_ep,
+    })).sort((a, b) => (b.transactedAtEp || 0) - (a.transactedAtEp || 0));
+
+    const result = {
+      marketHashName: parsed.market_hash_name || marketHashName,
+      pattern: parsed.pattern || pattern || null,
+      count: parsed.count || sales.length,
+      sales,
+    };
+
+    // Salva nos caches
+    _bluegemMemCache.set(key, { data: result, fetchedAt: now });
+    try {
+      const docId = key.replace(/[/\\#?\[\]]/g, '_').slice(0, 1500);
+      await require('firebase-admin').firestore()
+        .collection('cspriceCache').doc('bluegem').collection('sales').doc(docId)
+        .set({ data: result, fetchedAt: now }, { merge: true });
+    } catch {}
+    return result;
+  } catch (e) {
+    console.error('[bluegem] fetch falhou:', e.message);
+    return null;
+  }
+}
+
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
 
@@ -907,6 +996,17 @@ exports.handler = async (event) => {
     return json(200, result);
   }
 
+  // GET /api/pricempire/bluegem-sales?name=AK-47%20|%20Case%20Hardened&pattern=661
+  // Histórico de vendas reais por pattern (top tier feature pra Case Hardened etc)
+  if (event.httpMethod === 'GET' && path.endsWith('/bluegem-sales')) {
+    const q = event.queryStringParameters || {};
+    if (!q.name) return json(400, { error: 'missing param: name' });
+    const pattern = q.pattern ? parseInt(q.pattern, 10) : null;
+    const result = await getBluegemSales(q.name, pattern);
+    if (!result) return json(404, { error: 'not_found_or_no_sales', name: q.name, pattern });
+    return json(200, result);
+  }
+
   // GET /api/pricempire/buyorder?name=AK-47%20|%20Redline%20(Field-Tested)
   // Retorna o preço de buyorder real (o que outros pagam pra comprar AGORA).
   if (event.httpMethod === 'GET' && path.endsWith('/buyorder')) {
@@ -948,6 +1048,7 @@ exports.getAllFloatRangesForSkin = getAllFloatRangesForSkin;
 exports.fetchFloatRangedData = fetchFloatRangedData;
 exports.getYoupinBuyorder = getYoupinBuyorder;
 exports.fetchYoupinBuyorders = fetchYoupinBuyorders;
+exports.getBluegemSales = getBluegemSales;
 exports.analyzeOverpay = analyzeOverpay;
 exports.buildIconUrl = buildIconUrl;
 exports.suggestSkins = suggestSkins;
