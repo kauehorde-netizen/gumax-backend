@@ -81,15 +81,21 @@ async function getAuth(event) {
 async function cleanupStaleLobbies() {
   const db = admin.firestore();
   const cutoff = Date.now() - LOBBY_IDLE_TTL_MS;
-  const snap = await db.collection('lobbies')
-    .where('updatedAt', '<', admin.firestore.Timestamp.fromMillis(cutoff))
-    .where('status', 'in', ['open', 'full'])
-    .get();
-  if (snap.empty) return 0;
+  // Query simples (sem composite index): pega tudo e filtra client-side.
+  // OK pra MVP (~30 docs no total).
+  const snap = await db.collection('lobbies').limit(200).get();
+  const expired = [];
+  snap.docs.forEach(d => {
+    const data = d.data();
+    if (!['open', 'full'].includes(data.status)) return;
+    const updatedAtMs = data.updatedAt?.toMillis ? data.updatedAt.toMillis() : 0;
+    if (updatedAtMs && updatedAtMs < cutoff) expired.push(d.ref);
+  });
+  if (!expired.length) return 0;
   const batch = db.batch();
-  snap.docs.forEach(d => batch.delete(d.ref));
+  expired.forEach(ref => batch.delete(ref));
   await batch.commit();
-  return snap.size;
+  return expired.length;
 }
 
 // ───── POST /create — cria lobby novo (5 slots, owner ocupa o slot 0) ─────
@@ -132,17 +138,17 @@ async function handleCreate(event) {
 }
 
 // ───── GET /list — todas salas abertas + cheias (sem em_match/finished) ───
+// Query simplificada (sem índice composto): pega TUDO e filtra/ordena client-side.
+// Pra escala MVP (~30 user simultâneos, max 30 lobbies), isso é trivial.
 async function handleList() {
-  await cleanupStaleLobbies(); // best effort
+  await cleanupStaleLobbies().catch(() => {});
   const db = admin.firestore();
-  const snap = await db.collection('lobbies')
-    .where('status', 'in', ['open', 'full', 'challenged'])
-    .orderBy('updatedAt', 'desc')
-    .limit(50)
-    .get();
-  const lobbies = snap.docs.map(d => {
+  const snap = await db.collection('lobbies').limit(100).get();
+  const lobbies = [];
+  snap.docs.forEach(d => {
     const data = d.data();
-    return {
+    if (!['open', 'full', 'challenged'].includes(data.status)) return;
+    lobbies.push({
       id: d.id,
       name: data.name,
       ownerName: data.ownerName,
@@ -152,8 +158,11 @@ async function handleList() {
       filled: (data.slots || []).filter(s => s != null).length,
       challengedBy: data.challengedBy,
       matchId: data.matchId,
-    };
+      updatedAtMs: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : 0,
+    });
   });
+  // Ordena por updatedAt desc (mais recente primeiro)
+  lobbies.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
   return json(200, { count: lobbies.length, lobbies });
 }
 
