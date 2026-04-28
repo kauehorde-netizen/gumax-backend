@@ -134,6 +134,7 @@ async function handleCreate(event) {
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
 
+  console.log(`[lobby:create] created ${lobbyRef.id} owner=${user.uid} name="${name}"`);
   return json(200, { lobbyId: lobbyRef.id });
 }
 
@@ -141,12 +142,17 @@ async function handleCreate(event) {
 // Query simplificada (sem índice composto): pega TUDO e filtra/ordena client-side.
 // Pra escala MVP (~30 user simultâneos, max 30 lobbies), isso é trivial.
 async function handleList() {
-  await cleanupStaleLobbies().catch(() => {});
+  // DEBUG: cleanup desativado temporariamente até confirmar que não tá deletando
+  // salas recém-criadas por engano. Reativa depois que estabilizar.
+  // await cleanupStaleLobbies().catch(() => {});
   const db = admin.firestore();
   const snap = await db.collection('lobbies').limit(100).get();
+  console.log(`[lobby:list] read ${snap.size} docs from collection`);
   const lobbies = [];
+  const allStatuses = [];
   snap.docs.forEach(d => {
     const data = d.data();
+    allStatuses.push(`${d.id}=${data.status}`);
     if (!['open', 'full', 'challenged'].includes(data.status)) return;
     lobbies.push({
       id: d.id,
@@ -161,6 +167,7 @@ async function handleList() {
       updatedAtMs: data.updatedAt?.toMillis ? data.updatedAt.toMillis() : 0,
     });
   });
+  console.log(`[lobby:list] returning ${lobbies.length} lobbies. All statuses: ${allStatuses.join(',')}`);
   // Ordena por updatedAt desc (mais recente primeiro)
   lobbies.sort((a, b) => b.updatedAtMs - a.updatedAtMs);
   return json(200, { count: lobbies.length, lobbies });
