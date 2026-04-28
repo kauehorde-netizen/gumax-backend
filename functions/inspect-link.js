@@ -19,7 +19,10 @@
 const admin = require('firebase-admin');
 const https = require('https');
 
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+// Cache 30 DIAS — inspect links de listings do Steam Market são quase sempre estáveis
+// (a primeira listing fica viva por meses/anos). Como o scraping é frágil (Steam
+// bloqueia frequentemente), uma vez que pegamos um link válido vale ouro.
+const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const STEAM_MARKET_OWNER_ID = '76561202255233023'; // Steam Market usa esse SteamID fixo nos inspect links
 
 const CORS = {
@@ -35,16 +38,37 @@ function json(code, body) {
 function httpsGet(url, opts = {}) {
   return new Promise((resolve, reject) => {
     const timeout = opts.timeout || 10000;
+    // Headers que mimicam um Chrome real visitando steamcommunity.com.
+    // Sem o conjunto completo, Steam serve 200 mas com payload reduzido (sem
+    // listinginfo/asset.actions) e fica achando que é bot.
+    const browserHeaders = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8,pt;q=0.7',
+      'Accept-Encoding': 'identity',                  // sem gzip pra simplificar parsing
+      'Cache-Control': 'no-cache',
+      'Pragma': 'no-cache',
+      'Sec-Ch-Ua': '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-origin',
+      'Referer': 'https://steamcommunity.com/market/',
+      'Origin': 'https://steamcommunity.com',
+      // Cookie de sessão fake — Steam aceita qualquer browserid + steamCountry pra
+      // não disparar verificação. Alguns endpoints só servem dados completos com
+      // session ID válido; pra contornar, mandamos um "navegador anônimo" plausível.
+      'Cookie': [
+        `browserid=${process.env.STEAM_BROWSERID || '38' + Date.now().toString().slice(-8)}`,
+        'sessionidSecureOpenIDNonce=ABC',
+        'steamCountry=BR%7C' + (process.env.STEAM_COOKIE_HASH || 'a1b2c3d4e5f6789012345678901234567890ab'),
+        'timezoneOffset=-10800,0',
+      ].join('; '),
+    };
     const req = https.get(url, {
       timeout,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'identity', // sem gzip pra simplificar parsing
-        'Cache-Control': 'no-cache',
-        ...(opts.headers || {}),
-      },
+      headers: { ...browserHeaders, ...(opts.headers || {}) },
     }, (res) => {
       let body = '';
       res.on('data', c => body += c);
