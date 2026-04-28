@@ -466,32 +466,53 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
       const newMvps    = (prev.mvps    || 0) + (s.mvps    || 0);
       const newAdrSum  = (prev.totalAdr|| 0) + (s.adr     || 0);
 
-      // ── Rolling window últimas 10 partidas ──
+      // ── Rolling window: guardamos as últimas 20 partidas pra histórico
+      // (página de perfil mostra), mas o LEVEL só usa as últimas 10 ──
       const prevRecent = Array.isArray(prev.recent10) ? prev.recent10 : [];
+
+      // Determina placar do POV do player (próprio time × adversário)
+      const inA = teamABySteamId.has(steamId);
+      const myScore  = inA ? (matchData?.scoreA || 0) : (matchData?.scoreB || 0);
+      const oppScore = inA ? (matchData?.scoreB || 0) : (matchData?.scoreA || 0);
+
       const newEntry = {
         matchId,
         kills: s.kills || 0,
         deaths: s.deaths || 0,
         assists: s.assists || 0,
         adr: s.adr || 0,
+        rating: s.rating || 0,
+        hsRate: s.hsRate || 0,
+        mvps: s.mvps || 0,
         result,
+        // Campos novos pra página de perfil (denormalizados aqui pra evitar N+1)
+        map: matchData?.mapVeto?.finalMap || null,
+        scoreOwn: myScore,
+        scoreOpp: oppScore,
+        team: inA ? 'A' : 'B',
         playedAt: admin.firestore.Timestamp.now(),
       };
-      // Adiciona no fim, mantém só as últimas 10
-      const recent10 = [...prevRecent, newEntry].slice(-10);
+      // Mantém últimas 20 (pra histórico). Level usa só as últimas 10 via slice.
+      const recent10 = [...prevRecent, newEntry].slice(-20);
+      const last10ForLevel = recent10.slice(-10);
 
       // KDR rolling = soma kills / soma deaths nas últimas 10
-      const recentKills  = recent10.reduce((acc, m) => acc + (m.kills  || 0), 0);
-      const recentDeaths = recent10.reduce((acc, m) => acc + (m.deaths || 0), 0);
+      const recentKills  = last10ForLevel.reduce((acc, m) => acc + (m.kills  || 0), 0);
+      const recentDeaths = last10ForLevel.reduce((acc, m) => acc + (m.deaths || 0), 0);
       const kdrRecent10 = recentKills / Math.max(1, recentDeaths);
 
       // Win streak — conta vitórias consecutivas a partir do FIM (mais recente)
-      // Se a última partida foi loss/tie, streak = 0.
       let winStreak = 0;
       for (let i = recent10.length - 1; i >= 0; i--) {
         if (recent10[i].result === 'win') winStreak++;
         else break;
       }
+
+      // Win/loss total (all-time)
+      const prevWins   = prev.wins   || 0;
+      const prevLosses = prev.losses || 0;
+      const newWins    = prevWins   + (result === 'win'  ? 1 : 0);
+      const newLosses  = prevLosses + (result === 'loss' ? 1 : 0);
 
       // Level calculado a partir do KDR rolling
       const level = computeLevel(kdrRecent10, newMatches);
@@ -508,17 +529,92 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
         kdr:    newKills / Math.max(1, newDeaths),
         kda:   (newKills + newAssists) / Math.max(1, newDeaths),
         avgAdr: newAdrSum / Math.max(1, newMatches),
-        // Rolling 10 — esses são os "atuais"
+        // Rolling 20 — esses são os "atuais" (últimas 10 viram level)
         recent10,
         kdrRecent10: Math.round(kdrRecent10 * 100) / 100,
         winStreak,
         level,
+        wins: newWins,
+        losses: newLosses,
         // Meta
         lastMatchId: matchId,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
     });
   }
+}
+
+// ── GET /api/match/player/:steamId ─────────────────────────────────────
+// Perfil completo de um jogador específico — stats all-time + rolling 10
+// + histórico das últimas 20 partidas (com map, score, kda detalhado).
+// Endpoint PÚBLICO (qualquer um pode ver perfil de qualquer player).
+async function handlePlayerProfile(steamId) {
+  if (!steamId) return json(400, { error: 'missing_steamId' });
+  const db = admin.firestore();
+  const snap = await db.collection('playerStats').doc(steamId).get();
+  if (!snap.exists) return json(404, { error: 'player_not_found', steamId });
+  const data = snap.data();
+
+  // Tenta enriquecer com avatar/nome do users/{uid} (uid pode ser igual ao steamId
+  // pra logins via Steam, mas nem sempre — vamos tentar both)
+  let displayName = data.steamName || `Player ${steamId.slice(-4)}`;
+  let avatar = data.steamAvatar || '';
+  try {
+    const userSnap = await db.collection('users').doc(steamId).get();
+    if (userSnap.exists) {
+      const u = userSnap.data();
+      displayName = u.steamName || u.fullName || displayName;
+      avatar = u.steamAvatar || u.photoURL || avatar;
+    }
+  } catch {}
+
+  // Atualiza no playerStats se enriqueceu (cache pra próximas reads)
+  if (!data.steamName && displayName !== `Player ${steamId.slice(-4)}`) {
+    db.collection('playerStats').doc(steamId).set(
+      { steamName: displayName, steamAvatar: avatar }, { merge: true }
+    ).catch(() => {});
+  }
+
+  const matches = data.matches || 0;
+  const wins   = data.wins   || 0;
+  const losses = data.losses || 0;
+  const winRate = matches > 0 ? Math.round((wins / matches) * 100) : 0;
+
+  return json(200, {
+    steamId,
+    name: displayName,
+    avatar,
+    level: data.level || null,
+    // All-time
+    matches, wins, losses, winRate,
+    kills: data.kills || 0,
+    deaths: data.deaths || 0,
+    assists: data.assists || 0,
+    mvps: data.mvps || 0,
+    kdr: Math.round((data.kdr || 0) * 100) / 100,
+    kda: Math.round((data.kda || 0) * 100) / 100,
+    avgAdr: Math.round(data.avgAdr || 0),
+    // Rolling
+    kdrRecent10: data.kdrRecent10 || 0,
+    winStreak: data.winStreak || 0,
+    // Histórico — últimas 20 partidas (mais recentes primeiro)
+    history: (Array.isArray(data.recent10) ? [...data.recent10] : []).reverse().map(m => ({
+      matchId: m.matchId,
+      map: m.map || null,
+      result: m.result || 'unknown',
+      kills: m.kills || 0,
+      deaths: m.deaths || 0,
+      assists: m.assists || 0,
+      adr: Math.round(m.adr || 0),
+      mvps: m.mvps || 0,
+      hsRate: m.hsRate || 0,
+      scoreOwn: m.scoreOwn || 0,
+      scoreOpp: m.scoreOpp || 0,
+      kdr: m.deaths > 0 ? Math.round((m.kills / m.deaths) * 100) / 100 : (m.kills || 0),
+      playedAt: m.playedAt?._seconds ? m.playedAt._seconds * 1000 : null,
+    })),
+    updatedAt: data.updatedAt?._seconds ? data.updatedAt._seconds * 1000 : null,
+  });
 }
 
 // ── GET /api/match/players?ids=steamId1,steamId2,... ────────────────────
@@ -613,6 +709,9 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'GET' && path.endsWith('/ranking')) return handleRanking();
   // /api/match/players?ids=... (GET, público — batch stats pra mostrar level/KDR em lobby)
   if (event.httpMethod === 'GET' && path.endsWith('/players')) return handlePlayersBatch(event);
+  // /api/match/player/:steamId (GET, público — perfil completo + histórico)
+  const playerMatch = path.match(/\/api\/match\/player\/([^/]+)$/);
+  if (event.httpMethod === 'GET' && playerMatch) return handlePlayerProfile(playerMatch[1]);
 
   // /api/match/:id e /api/match/:id/{action}
   const m = path.match(/\/api\/match\/([^/]+)(?:\/([^/]+))?$/);
