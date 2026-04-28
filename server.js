@@ -301,6 +301,7 @@ app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHan
 // Trader Pro features (CSPriceAPI): float ranged + youpin buyorder + análise overpay
 app.get('/api/pricempire/float-ranged', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/buyorder', rateLimit(60000, 60), wrapHandler(pricempireHandler));
+app.get('/api/pricempire/bluegem-sales', rateLimit(60000, 60), wrapHandler(pricempireHandler)); // histórico vendas por pattern
 app.post('/api/pricempire/analyze-overpay', rateLimit(60000, 30), wrapHandler(pricempireHandler));
 
 // Float inspector (float exato + pattern via SteamWebAPI.com)
