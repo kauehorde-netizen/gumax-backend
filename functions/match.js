@@ -398,8 +398,9 @@ async function handleWebhook(event) {
       demoUrl: body.demo_url || null,
     });
 
-    // Atualiza playerStats agregados (pra ranking individual)
-    await aggregatePlayerStats(matchId, stats);
+    // Lê o doc atualizado (com winner/scoreA/scoreB) pra passar ao aggregate
+    const updatedSnap = await ref.get();
+    await aggregatePlayerStats(matchId, stats, updatedSnap.data());
 
     // Libera os lobbies pra próxima partida
     const matchData = (await ref.get()).data();
@@ -410,26 +411,109 @@ async function handleWebhook(event) {
   return json(200, { received: true });
 }
 
-// Aggrega stats dos jogadores em playerStats/{steamId} pra ranking
-async function aggregatePlayerStats(matchId, stats) {
+// ── Cálculo de Level (1-10) baseado em KDR das últimas 10 partidas ──
+// Faixas calibradas pra distribuir bem players amadores → semi-pro:
+//   Level 1: KDR < 0.55  → newbie/aprendendo
+//   Level 5: KDR ~1.00   → mediano (mata = morre)
+//   Level 10: KDR > 1.80 → smurfando, top 1%
+// Player precisa de >= 3 partidas pra ter level (antes disso = null/sem nível).
+function computeLevel(kdrRecent, matchCount) {
+  if (!matchCount || matchCount < 3) return null;
+  const k = kdrRecent || 0;
+  if (k < 0.55) return 1;
+  if (k < 0.70) return 2;
+  if (k < 0.85) return 3;
+  if (k < 1.00) return 4;
+  if (k < 1.15) return 5;
+  if (k < 1.30) return 6;
+  if (k < 1.45) return 7;
+  if (k < 1.60) return 8;
+  if (k < 1.80) return 9;
+  return 10;
+}
+
+// Aggrega stats dos jogadores em playerStats/{steamId} pra ranking + level.
+// Mantém TUDO histórico (kills/deaths/matches all-time) E ALÉM DISSO um
+// rolling buffer das últimas 10 partidas pra calcular KDR "atual" e level.
+//
+// Pra cada player no `stats`, precisa saber:
+//   - Em qual time ele estava (teamA ou teamB) → pra determinar win/loss
+//   - O placar do match → match.winner ('A', 'B' ou 'tie')
+async function aggregatePlayerStats(matchId, stats, matchData) {
   const db = admin.firestore();
+  const winner = matchData?.winner || null;            // 'A' | 'B' | 'tie' | null
+  const teamABySteamId = new Set((matchData?.teamA || []).map(p => p.steamId));
+  const teamBBySteamId = new Set((matchData?.teamB || []).map(p => p.steamId));
+
   for (const [steamId, s] of Object.entries(stats)) {
     const ref = db.collection('playerStats').doc(steamId);
+
+    // Determina resultado pro player nessa partida
+    let result = 'unknown';
+    if (winner === 'tie') result = 'tie';
+    else if (winner === 'A') result = teamABySteamId.has(steamId) ? 'win' : 'loss';
+    else if (winner === 'B') result = teamBBySteamId.has(steamId) ? 'win' : 'loss';
+
     await db.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
-      const prev = snap.exists ? snap.data() : { matches: 0, kills: 0, deaths: 0, assists: 0, mvps: 0, totalAdr: 0 };
+      const prev = snap.exists ? snap.data() : {};
+
+      // ── All-time totals (preservados) ──
+      const newMatches = (prev.matches || 0) + 1;
+      const newKills   = (prev.kills   || 0) + (s.kills   || 0);
+      const newDeaths  = (prev.deaths  || 0) + (s.deaths  || 0);
+      const newAssists = (prev.assists || 0) + (s.assists || 0);
+      const newMvps    = (prev.mvps    || 0) + (s.mvps    || 0);
+      const newAdrSum  = (prev.totalAdr|| 0) + (s.adr     || 0);
+
+      // ── Rolling window últimas 10 partidas ──
+      const prevRecent = Array.isArray(prev.recent10) ? prev.recent10 : [];
+      const newEntry = {
+        matchId,
+        kills: s.kills || 0,
+        deaths: s.deaths || 0,
+        assists: s.assists || 0,
+        adr: s.adr || 0,
+        result,
+        playedAt: admin.firestore.Timestamp.now(),
+      };
+      // Adiciona no fim, mantém só as últimas 10
+      const recent10 = [...prevRecent, newEntry].slice(-10);
+
+      // KDR rolling = soma kills / soma deaths nas últimas 10
+      const recentKills  = recent10.reduce((acc, m) => acc + (m.kills  || 0), 0);
+      const recentDeaths = recent10.reduce((acc, m) => acc + (m.deaths || 0), 0);
+      const kdrRecent10 = recentKills / Math.max(1, recentDeaths);
+
+      // Win streak — conta vitórias consecutivas a partir do FIM (mais recente)
+      // Se a última partida foi loss/tie, streak = 0.
+      let winStreak = 0;
+      for (let i = recent10.length - 1; i >= 0; i--) {
+        if (recent10[i].result === 'win') winStreak++;
+        else break;
+      }
+
+      // Level calculado a partir do KDR rolling
+      const level = computeLevel(kdrRecent10, newMatches);
+
       tx.set(ref, {
         steamId,
-        matches: (prev.matches || 0) + 1,
-        kills: (prev.kills || 0) + (s.kills || 0),
-        deaths: (prev.deaths || 0) + (s.deaths || 0),
-        assists: (prev.assists || 0) + (s.assists || 0),
-        mvps: (prev.mvps || 0) + (s.mvps || 0),
-        totalAdr: (prev.totalAdr || 0) + (s.adr || 0),
-        // Médias derivadas (calculadas no read pelo frontend)
-        kdr: ((prev.kills || 0) + (s.kills || 0)) / Math.max(1, (prev.deaths || 0) + (s.deaths || 0)),
-        kda: ((prev.kills || 0) + (s.kills || 0) + (prev.assists || 0) + (s.assists || 0)) / Math.max(1, (prev.deaths || 0) + (s.deaths || 0)),
-        avgAdr: ((prev.totalAdr || 0) + (s.adr || 0)) / Math.max(1, (prev.matches || 0) + 1),
+        // All-time
+        matches: newMatches,
+        kills: newKills,
+        deaths: newDeaths,
+        assists: newAssists,
+        mvps: newMvps,
+        totalAdr: newAdrSum,
+        kdr:    newKills / Math.max(1, newDeaths),
+        kda:   (newKills + newAssists) / Math.max(1, newDeaths),
+        avgAdr: newAdrSum / Math.max(1, newMatches),
+        // Rolling 10 — esses são os "atuais"
+        recent10,
+        kdrRecent10: Math.round(kdrRecent10 * 100) / 100,
+        winStreak,
+        level,
+        // Meta
         lastMatchId: matchId,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, { merge: true });
@@ -437,16 +521,46 @@ async function aggregatePlayerStats(matchId, stats) {
   }
 }
 
-// ── GET /ranking — top 50 jogadores ordenados por rating composto ────────
-// Rating Gumax = 0.4 * KDR + 0.3 * KDA + 0.3 * (avgAdr / 100)
-// Joga em escala 0-2 onde:
-//   1.0 = jogador médio (KDR 1.0, KDA 1.5, ADR ~70)
-//   1.5 = bom jogador
-//   2.0+ = profissional
+// ── GET /api/match/players?ids=steamId1,steamId2,... ────────────────────
+// Endpoint público pra batch fetch de stats. Frontend usa pra mostrar
+// level+KDR ao lado de cada jogador na lobby/match sem fazer N requisições.
+// Retorna objeto: { steamId1: { level, kdrRecent10, winStreak, matches }, ... }
+async function handlePlayersBatch(event) {
+  // server.js coloca req.query em event.queryStringParameters
+  const idsParam = (event.queryStringParameters && event.queryStringParameters.ids) || '';
+  const ids = idsParam.split(',').map(s => s.trim()).filter(Boolean).slice(0, 50); // max 50
+  if (!ids.length) return json(400, { error: 'missing_ids' });
+
+  const db = admin.firestore();
+  const result = {};
+  // Firestore .getAll() pra batch read em 1 round-trip
+  const refs = ids.map(id => db.collection('playerStats').doc(id));
+  const snaps = await db.getAll(...refs);
+  snaps.forEach((snap, i) => {
+    const id = ids[i];
+    if (snap.exists) {
+      const d = snap.data();
+      result[id] = {
+        steamId: id,
+        level: d.level || null,
+        kdrRecent10: d.kdrRecent10 || 0,
+        winStreak: d.winStreak || 0,
+        matches: d.matches || 0,
+      };
+    } else {
+      // Player nunca jogou — sem stats
+      result[id] = { steamId: id, level: null, kdrRecent10: 0, winStreak: 0, matches: 0 };
+    }
+  });
+  return json(200, { players: result });
+}
+
+// ── GET /ranking — top 50 jogadores ordenados por LEVEL + KDR rolling ────
+// Mudança v2: usa stats das últimas 10 partidas (não all-time) — reflete
+// melhor a forma ATUAL do player. Players com < 3 partidas vão pro fim.
 async function handleRanking() {
   const db = admin.firestore();
-  // Pega top 100 por matches jogados (proxy de atividade), depois calcula rating
-  // e re-ordena. Limita a top 50 no retorno final.
+  // Pega top 100 por matches jogados (proxy de atividade), depois ordena por level
   const snap = await db.collection('playerStats')
     .orderBy('matches', 'desc')
     .limit(100)
@@ -455,11 +569,6 @@ async function handleRanking() {
     const data = d.data();
     const matches = data.matches || 0;
     if (matches < 1) return null;
-    // Joga avatar/nome do users/{steamId} se existir, senão usa steamId
-    const kdr = data.kdr || 0;
-    const kda = data.kda || 0;
-    const avgAdr = data.avgAdr || 0;
-    const rating = 0.4 * kdr + 0.3 * kda + 0.3 * (avgAdr / 100);
     return {
       steamId: d.id,
       name: data.steamName || `Player ${d.id.slice(-4)}`,
@@ -469,16 +578,25 @@ async function handleRanking() {
       deaths: data.deaths || 0,
       assists: data.assists || 0,
       mvps: data.mvps || 0,
-      kdr: Math.round(kdr * 100) / 100,
-      kda: Math.round(kda * 100) / 100,
-      avgAdr: Math.round(avgAdr),
-      rating: Math.round(rating * 100) / 100,
+      // KDR atual (rolling 10) — esse é o oficial pra ranking
+      kdr: data.kdrRecent10 || (data.kdr ? Math.round(data.kdr * 100) / 100 : 0),
+      // KDR all-time (pra histórico)
+      kdrAllTime: Math.round((data.kdr || 0) * 100) / 100,
+      kda: Math.round((data.kda || 0) * 100) / 100,
+      avgAdr: Math.round(data.avgAdr || 0),
+      level: data.level || null,
+      winStreak: data.winStreak || 0,
       lastMatchId: data.lastMatchId || null,
     };
   }).filter(Boolean);
 
-  // Ordena por rating desc
-  players.sort((a, b) => b.rating - a.rating);
+  // Ordena por level desc (jogadores sem level vão pro fim), depois kdr desc
+  players.sort((a, b) => {
+    const la = a.level || 0;
+    const lb = b.level || 0;
+    if (lb !== la) return lb - la;
+    return b.kdr - a.kdr;
+  });
   const top = players.slice(0, 50);
   return json(200, { count: top.length, players: top, generatedAt: Date.now() });
 }
@@ -493,6 +611,8 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'POST' && path.endsWith('/webhook')) return handleWebhook(event);
   // /api/match/ranking (GET, público)
   if (event.httpMethod === 'GET' && path.endsWith('/ranking')) return handleRanking();
+  // /api/match/players?ids=... (GET, público — batch stats pra mostrar level/KDR em lobby)
+  if (event.httpMethod === 'GET' && path.endsWith('/players')) return handlePlayersBatch(event);
 
   // /api/match/:id e /api/match/:id/{action}
   const m = path.match(/\/api\/match\/([^/]+)(?:\/([^/]+))?$/);
