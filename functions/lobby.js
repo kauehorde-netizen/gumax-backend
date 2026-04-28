@@ -55,8 +55,10 @@ function json(code, body) {
   return { statusCode: code, headers: CORS, body: JSON.stringify(body) };
 }
 
-// TTL do lobby idle: 30min. Se ninguém interage, limpamos pra liberar a lista.
-const LOBBY_IDLE_TTL_MS = 30 * 60 * 1000;
+// TTL absoluto do lobby: 20min desde a CRIAÇÃO (createdAt).
+// Independente de updates — sala não fica viva eternamente, mesmo se gente
+// entrar/sair pra dar bump. User pediu explicitamente "20 minutos de criação".
+const LOBBY_MAX_AGE_MS = 20 * 60 * 1000;
 // TTL do desafio: 30s. Se a outra sala não aceitar nesse tempo, expira.
 const CHALLENGE_TTL_MS = 30 * 1000;
 
@@ -76,25 +78,32 @@ async function getAuth(event) {
   };
 }
 
-// Limpa lobbies idle (sem update há >30min). Idempotente. Chamado em listLobbies
-// e antes de operações importantes pra manter a lista limpa.
+// Limpa lobbies expirados — TTL absoluto de 20min desde createdAt.
+// Idempotente. Chamado a cada GET /list pra manter a coleção limpa
+// sem precisar de cron job. Se sala tem matchId (jogando), não toca.
+// Pra MVP (~30 docs total) o overhead é trivial.
 async function cleanupStaleLobbies() {
   const db = admin.firestore();
-  const cutoff = Date.now() - LOBBY_IDLE_TTL_MS;
-  // Query simples (sem composite index): pega tudo e filtra client-side.
-  // OK pra MVP (~30 docs no total).
+  const cutoff = Date.now() - LOBBY_MAX_AGE_MS;
   const snap = await db.collection('lobbies').limit(200).get();
   const expired = [];
   snap.docs.forEach(d => {
     const data = d.data();
-    if (!['open', 'full'].includes(data.status)) return;
-    const updatedAtMs = data.updatedAt?.toMillis ? data.updatedAt.toMillis() : 0;
-    if (updatedAtMs && updatedAtMs < cutoff) expired.push(d.ref);
+    // Não mexe em salas com partida em andamento (matchId set ou status in_match)
+    if (data.status === 'in_match' || data.matchId) return;
+    // createdAt pode não existir em docs muito antigos — fallback pra updatedAt
+    const ageRefMs = data.createdAt?.toMillis ? data.createdAt.toMillis()
+                   : data.updatedAt?.toMillis ? data.updatedAt.toMillis()
+                   : null;
+    // Se não tem timestamp algum, ignora (segurança — não deleta sem prova de idade)
+    if (!ageRefMs) return;
+    if (ageRefMs < cutoff) expired.push({ ref: d.ref, id: d.id, ageMin: Math.round((Date.now() - ageRefMs)/60000) });
   });
   if (!expired.length) return 0;
   const batch = db.batch();
-  expired.forEach(ref => batch.delete(ref));
+  expired.forEach(e => batch.delete(e.ref));
   await batch.commit();
+  console.log(`[lobby:cleanup] deleted ${expired.length} expired lobbies (>${LOBBY_MAX_AGE_MS/60000}min): ${expired.map(e => `${e.id}(${e.ageMin}min)`).join(', ')}`);
   return expired.length;
 }
 
@@ -142,9 +151,9 @@ async function handleCreate(event) {
 // Query simplificada (sem índice composto): pega TUDO e filtra/ordena client-side.
 // Pra escala MVP (~30 user simultâneos, max 30 lobbies), isso é trivial.
 async function handleList() {
-  // DEBUG: cleanup desativado temporariamente até confirmar que não tá deletando
-  // salas recém-criadas por engano. Reativa depois que estabilizar.
-  // await cleanupStaleLobbies().catch(() => {});
+  // Cleanup TTL 20min desde createdAt — roda em todo /list (idempotente).
+  // Garantia extra: NUNCA deleta salas com matchId set (em partida).
+  await cleanupStaleLobbies().catch(e => console.warn('[lobby:cleanup] failed:', e.message));
   const db = admin.firestore();
   const snap = await db.collection('lobbies').limit(100).get();
   console.log(`[lobby:list] read ${snap.size} docs from collection`);
