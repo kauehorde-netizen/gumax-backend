@@ -282,7 +282,9 @@ app.options('/api/lobby/*', (req, res) => res.sendStatus(204));
 // ── Match (após desafio aceito) ──
 app.post('/api/match/webhook',  rateLimit(60000, 60),  wrapHandler(matchHandler)); // sem auth — secret no header
 app.get('/api/match/ranking',   rateLimit(60000, 60),  wrapHandler(matchHandler));
+app.get('/api/match/players',   rateLimit(60000, 120), wrapHandler(matchHandler)); // batch stats (level/KDR) pra lobbies
 app.get('/api/match/:id',       rateLimit(60000, 120), wrapHandler(matchHandler));
+app.get('/api/match/:id/matchzy-config', rateLimit(60000, 30), wrapHandler(matchHandler)); // público pro MatchZy
 app.post('/api/match/:id/confirm', rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/match/:id/veto',    rateLimit(60000, 30), wrapHandler(matchHandler));
 app.options('/api/match/*', (req, res) => res.sendStatus(204));
