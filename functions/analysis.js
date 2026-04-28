@@ -176,29 +176,53 @@ function computeScore(prices, suggestedBRL) {
 }
 
 // ── Recomendação híbrida (algoritmo + override admin) ─────────────────────
+//
+// 4 verdicts pra alinhar com a intuição do consumidor final:
+//   COMPRAR  — oferta boa, preço abaixo da média (score alto OU tendência alta)
+//   JUSTO    — preço fair, pode comprar tranquilo se quer usar (sem urgência)
+//   AGUARDAR — tendência de queda detectada, vale esperar baixar mais
+//   EVITAR   — preço caro, não recomendamos
+//
+// MOTIVAÇÃO DA MUDANÇA: antes "ESPERAR" era usado pra "preço médio" o que confundia
+// o user (clicava em "JUSTO 64/100" mas via "ESPERAR" como recomendação — contradição).
 function autoRecommendation(scoreData, trend) {
-  if (!scoreData) return { verdict: 'ESPERAR', confidence: 30, reasons: ['Dados insuficientes'] };
+  if (!scoreData) return { verdict: 'JUSTO', confidence: 30, reasons: ['Dados insuficientes — análise limitada'] };
   const reasons = [];
   let points = 0;
 
-  if (scoreData.score >= 70) { points += 50; reasons.push(`Preço ${scoreData.score}/100 (bom)`); }
-  else if (scoreData.score >= 50) { points += 25; reasons.push(`Preço ${scoreData.score}/100 (justo)`); }
-  else { points -= 25; reasons.push(`Preço ${scoreData.score}/100 (caro)`); }
+  // Score do preço (0-100 onde 100 = ofertão)
+  const score = scoreData.score || 0;
+  if (score >= 70)      { points += 50; reasons.push(`Preço ${score}/100 (oferta boa)`); }
+  else if (score >= 50) { points += 25; reasons.push(`Preço ${score}/100 (justo)`); }
+  else                  { points -= 25; reasons.push(`Preço ${score}/100 (caro)`); }
 
-  if (scoreData.spread >= 15) { points += 20; reasons.push(`Arbitragem de ${scoreData.spread}% entre plataformas`); }
-  else if (scoreData.spread >= 8) { points += 10; }
+  // Spread/arbitragem (preço varia muito entre Buff/Steam/Skinport/etc)
+  if (scoreData.spread >= 15)      { points += 20; reasons.push(`Arbitragem de ${scoreData.spread}% entre plataformas`); }
+  else if (scoreData.spread >= 8)  { points += 10; }
 
-  if (trend?.direction === 'up') { points += 30; reasons.push(`Tendência de alta (+${trend.pctChange7d}%)`); }
-  else if (trend?.direction === 'down') { points -= 30; reasons.push(`Tendência de queda (${trend.pctChange7d}%)`); }
-  else if (trend?.direction === 'stable') { points += 5; reasons.push('Preço estável'); }
+  // Tendência últimos 7 dias
+  const trendDir = trend?.direction;
+  if (trendDir === 'up')        { points += 30; reasons.push(`Tendência de alta (+${trend.pctChange7d}%)`); }
+  else if (trendDir === 'down') { points -= 20; reasons.push(`Tendência de queda (${trend.pctChange7d}%)`); }
+  else if (trendDir === 'stable') { points += 5; reasons.push('Preço estável'); }
 
-  let verdict = 'ESPERAR';
-  if (points >= 60) verdict = 'COMPRAR';
-  else if (points <= 0) verdict = 'EVITAR';
+  // ── Decisão final (4 verdicts) ──
+  // Prioridade 1: tendência de queda forte → AGUARDAR (vai ficar mais barato)
+  // Prioridade 2: pontuação total decide
+  let verdict;
+  if (trendDir === 'down' && trend.pctChange7d <= -3) {
+    verdict = 'AGUARDAR';
+  } else if (points >= 55) {
+    verdict = 'COMPRAR';
+  } else if (points <= -10) {
+    verdict = 'EVITAR';
+  } else {
+    verdict = 'JUSTO';   // default — preço fair, sem urgência
+  }
 
   return {
     verdict,
-    confidence: Math.max(0, Math.min(100, 50 + points / 2)),
+    confidence: Math.max(20, Math.min(95, 50 + points / 2)),
     reasons,
   };
 }
