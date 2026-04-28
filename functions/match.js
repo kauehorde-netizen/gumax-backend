@@ -204,39 +204,151 @@ async function handleVeto(event, matchId) {
   return json(200, { ok: true, finalMap: finalResult?.finalMap || null });
 }
 
-// ── Setup do servidor CS2 (RCON + MatchZy) ───────────────────────────────
-// MVP: stubbed — retorna mock connectUrl. Quando o servidor Glibhost estiver
-// configurado com Metamod+CSS+MatchZy, troca pelo cliente RCON real abaixo.
+// ── Setup do servidor CS2 (RCON real via Source protocol + MatchZy) ──────
+// Conecta via RCON na máquina Glibhost, configura senha do servidor + carrega
+// match config do MatchZy via URL apontando pro nosso backend (/matchzy-config).
+//
+// Variáveis de ambiente esperadas no Railway:
+//   MATCH_SERVER_IP        - IP público do servidor CS2
+//   MATCH_SERVER_PORT      - porta do jogo (default 27015)
+//   MATCH_SERVER_RCON_PORT - porta RCON (default = MATCH_SERVER_PORT)
+//   MATCH_SERVER_RCON_PASS - senha do RCON (configurada no server.cfg)
+//   BACKEND_PUBLIC_URL     - URL pública do nosso backend (pra MatchZy chamar de volta)
+//   MATCHZY_WEBHOOK_SECRET - secret pra autenticar callbacks do MatchZy
 async function setupMatchServer(matchId) {
   const db = admin.firestore();
   const ref = db.collection('matches').doc(matchId);
 
-  // ── STUB ────────────────────────────────────────────────────────────
-  // Em produção, isso aqui faria:
-  //   1. Pega 1 servidor disponível do pool (ex: 2 servidores Glibhost)
-  //   2. Conecta RCON via TCP no IP:27015 com senha do servidor
-  //   3. Manda comandos:
-  //        sv_password <random16chars>
-  //        mp_teamname_1 "Time A"
-  //        mp_teamname_2 "Time B"
-  //        matchzy_loadmatch_url <URL apontando pra config JSON do match>
-  //        changelevel <finalMap>
-  //   4. Aguarda 10s pra mapa carregar
-  //   5. Retorna { ip, port, password, connectUrl: 'steam://run/730//+connect IP:27015 +password X' }
-  //
-  // Por enquanto, retorna stub pra UX funcionar end-to-end no frontend.
+  const ip = process.env.MATCH_SERVER_IP;
+  const gamePort = parseInt(process.env.MATCH_SERVER_PORT || '27015', 10);
+  const rconPort = parseInt(process.env.MATCH_SERVER_RCON_PORT || String(gamePort), 10);
+  const rconPass = process.env.MATCH_SERVER_RCON_PASS;
+  const backendUrl = process.env.BACKEND_PUBLIC_URL;
 
-  const password = 'gumax_' + Math.random().toString(36).slice(2, 8);
-  const ip = process.env.MATCH_SERVER_IP || '0.0.0.0';
-  const port = process.env.MATCH_SERVER_PORT || '27015';
-  const connectUrl = `steam://run/730//+connect%20${ip}:${port}%20+password%20${password}`;
+  // Validação de configuração — se faltam env vars, mata o match cedo
+  if (!ip || !rconPass || !backendUrl) {
+    const missing = [];
+    if (!ip) missing.push('MATCH_SERVER_IP');
+    if (!rconPass) missing.push('MATCH_SERVER_RCON_PASS');
+    if (!backendUrl) missing.push('BACKEND_PUBLIC_URL');
+    console.error(`[match ${matchId}] Faltam env vars:`, missing.join(', '));
+    await ref.update({
+      status: 'cancelled',
+      cancelReason: 'server_misconfigured',
+      cancelDetail: 'Missing env: ' + missing.join(', '),
+    });
+    return;
+  }
 
+  // Senha aleatória do servidor (jogadores recebem via connectUrl)
+  const password = 'gx_' + Math.random().toString(36).slice(2, 10);
+  const matchSnap = await ref.get();
+  const m = matchSnap.data();
+  const finalMap = m.mapVeto?.finalMap || 'de_mirage';
+
+  // URL pública pro MatchZy puxar a config do match. MatchZy faz GET nessa URL,
+  // recebe JSON com lista de jogadores + mapa + cvars, e configura o match.
+  // Doc: https://shobhit-pathak.github.io/MatchZy/match_setup/
+  const configUrl = `${backendUrl.replace(/\/$/, '')}/api/match/${matchId}/matchzy-config`;
+
+  let Rcon;
+  try {
+    Rcon = require('rcon-srcds').default || require('rcon-srcds');
+  } catch (err) {
+    console.error('[match] rcon-srcds não instalado. npm install rcon-srcds');
+    await ref.update({ status: 'cancelled', cancelReason: 'rcon_lib_missing' });
+    return;
+  }
+
+  console.log(`[match ${matchId}] RCON ${ip}:${rconPort} → setup match com mapa ${finalMap}`);
+  const rcon = new Rcon({ host: ip, port: rconPort, timeout: 5000 });
+  try {
+    await rcon.authenticate(rconPass);
+    console.log(`[match ${matchId}] RCON autenticado`);
+
+    // 1. Mata partida em andamento (se houver) e força reset limpo
+    await rcon.execute('matchzy_kick_when_no_match_loaded 0');
+
+    // 2. Define senha do servidor (só time vai conseguir conectar)
+    await rcon.execute(`sv_password "${password}"`);
+
+    // 3. Carrega match via URL — MatchZy puxa nosso JSON de config
+    //    Ele que vai trocar mapa, mp_teamname, e gerenciar tudo.
+    const loadCmd = `matchzy_loadmatch_url "${configUrl}"`;
+    const loadResp = await rcon.execute(loadCmd);
+    console.log(`[match ${matchId}] matchzy_loadmatch_url resposta:`, loadResp);
+
+    rcon.disconnect();
+  } catch (err) {
+    console.error(`[match ${matchId}] RCON falhou:`, err.message);
+    try { rcon.disconnect(); } catch {}
+    await ref.update({
+      status: 'cancelled',
+      cancelReason: 'rcon_failed',
+      cancelDetail: err.message,
+    });
+    return;
+  }
+
+  // Connect URL pros jogadores — `steam://run/730` abre CS2 e conecta direto.
+  const connectUrl = `steam://run/730//+connect%20${ip}:${gamePort}%20+password%20${password}`;
   await ref.update({
-    serverInfo: { ip, port, password, connectUrl },
+    serverInfo: { ip, port: gamePort, password, connectUrl, configUrl, rconPort },
     status: 'in_progress',
     startedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
-  console.log(`[match ${matchId}] server stub: ${ip}:${port} pw=${password}`);
+  console.log(`[match ${matchId}] Pronto — players podem conectar via ${connectUrl}`);
+}
+
+// ── GET /:id/matchzy-config — JSON consumido pelo MatchZy ───────────────
+// MatchZy faz GET nessa URL após o setupMatchServer chamar matchzy_loadmatch_url.
+// Endpoint público (sem auth) — segurança via secret na URL é difícil porque
+// MatchZy não suporta headers customizados. Risco: se alguém adivinhar matchId,
+// consegue ler config (não modifica). matchIds são UUIDs do Firestore, ~10^15
+// possíveis. Aceitável pra MVP.
+async function handleMatchzyConfig(matchId) {
+  const db = admin.firestore();
+  const snap = await db.collection('matches').doc(matchId).get();
+  if (!snap.exists) return json(404, { error: 'match_not_found' });
+  const m = snap.data();
+  if (m.status !== 'starting' && m.status !== 'in_progress') {
+    return json(409, { error: 'match_not_ready', status: m.status });
+  }
+
+  // Schema MatchZy: https://shobhit-pathak.github.io/MatchZy/match_setup/
+  const team1Players = {};
+  (m.teamA || []).forEach(p => { if (p.steamId) team1Players[p.steamId] = p.name || 'Player'; });
+  const team2Players = {};
+  (m.teamB || []).forEach(p => { if (p.steamId) team2Players[p.steamId] = p.name || 'Player'; });
+
+  const webhookSecret = process.env.MATCHZY_WEBHOOK_SECRET || 'change-me';
+  const backendUrl = (process.env.BACKEND_PUBLIC_URL || '').replace(/\/$/, '');
+
+  return json(200, {
+    matchid: matchId,
+    team1: { name: 'Time A', players: team1Players },
+    team2: { name: 'Time B', players: team2Players },
+    num_maps: 1,
+    maplist: [m.mapVeto?.finalMap || 'de_mirage'],
+    map_sides: ['knife'],          // knife round decide os lados
+    spectators: { players: {} },
+    clinch_series: true,
+    players_per_team: 5,
+    min_players_to_ready: 5,
+    cvars: {
+      // MatchZy chama essa URL no final da partida com stats completas
+      matchzy_remote_log_url: `${backendUrl}/api/match/webhook`,
+      matchzy_remote_log_header_key: 'X-MatchZy-Secret',
+      matchzy_remote_log_header_value: webhookSecret,
+      // Configs padrão de competitivo
+      mp_friendlyfire: 1,
+      mp_overtime_enable: 1,
+      mp_overtime_maxrounds: 6,
+      mp_maxrounds: 24,            // MR12 estilo Premier
+      mp_round_restart_delay: 5,
+      sv_pausable: 1,
+    },
+  });
 }
 
 // ── POST /webhook — MatchZy callback ao final ──────────────────────────
@@ -325,17 +437,50 @@ async function aggregatePlayerStats(matchId, stats) {
   }
 }
 
-// ── GET /ranking — top 50 jogadores por rating (KDR + KDA + ADR ponderado)
+// ── GET /ranking — top 50 jogadores ordenados por rating composto ────────
+// Rating Gumax = 0.4 * KDR + 0.3 * KDA + 0.3 * (avgAdr / 100)
+// Joga em escala 0-2 onde:
+//   1.0 = jogador médio (KDR 1.0, KDA 1.5, ADR ~70)
+//   1.5 = bom jogador
+//   2.0+ = profissional
 async function handleRanking() {
   const db = admin.firestore();
-  // Ordena por kills total como proxy de atividade. Em produção fazer cálculo
-  // de "rating" composto (ex: HLTV 2.0 simplificado: 0.4*kdr + 0.3*kda + 0.3*adrNorm).
+  // Pega top 100 por matches jogados (proxy de atividade), depois calcula rating
+  // e re-ordena. Limita a top 50 no retorno final.
   const snap = await db.collection('playerStats')
     .orderBy('matches', 'desc')
-    .limit(50)
+    .limit(100)
     .get();
-  const players = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  return json(200, { count: players.length, players });
+  const players = snap.docs.map(d => {
+    const data = d.data();
+    const matches = data.matches || 0;
+    if (matches < 1) return null;
+    // Joga avatar/nome do users/{steamId} se existir, senão usa steamId
+    const kdr = data.kdr || 0;
+    const kda = data.kda || 0;
+    const avgAdr = data.avgAdr || 0;
+    const rating = 0.4 * kdr + 0.3 * kda + 0.3 * (avgAdr / 100);
+    return {
+      steamId: d.id,
+      name: data.steamName || `Player ${d.id.slice(-4)}`,
+      avatar: data.steamAvatar || '',
+      matches,
+      kills: data.kills || 0,
+      deaths: data.deaths || 0,
+      assists: data.assists || 0,
+      mvps: data.mvps || 0,
+      kdr: Math.round(kdr * 100) / 100,
+      kda: Math.round(kda * 100) / 100,
+      avgAdr: Math.round(avgAdr),
+      rating: Math.round(rating * 100) / 100,
+      lastMatchId: data.lastMatchId || null,
+    };
+  }).filter(Boolean);
+
+  // Ordena por rating desc
+  players.sort((a, b) => b.rating - a.rating);
+  const top = players.slice(0, 50);
+  return json(200, { count: top.length, players: top, generatedAt: Date.now() });
 }
 
 // ─── Handler HTTP ───────────────────────────────────────────────────────
@@ -355,7 +500,11 @@ exports.handler = async (event) => {
   const matchId = m[1];
   const action = m[2] || '';
 
+  // GET /api/match/:id — estado do match (auth required)
   if (event.httpMethod === 'GET' && !action) return handleGet(event, matchId);
+  // GET /api/match/:id/matchzy-config — JSON pro MatchZy puxar (público, no auth)
+  if (event.httpMethod === 'GET' && action === 'matchzy-config') return handleMatchzyConfig(matchId);
+
   if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
 
   switch (action) {
