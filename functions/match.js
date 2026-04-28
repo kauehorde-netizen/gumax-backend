@@ -262,19 +262,40 @@ async function setupMatchServer(matchId) {
 
   console.log(`[match ${matchId}] RCON ${ip}:${rconPort} → setup match com mapa ${finalMap}`);
   const rcon = new Rcon({ host: ip, port: rconPort, timeout: 5000 });
+
+  // ── WORKAROUND CS2 RCON BUG ──
+  // RCON nativo do CS2 está disfuncional desde o lançamento — muitos comandos
+  // de engine não executam (sv_password, changelevel, etc). Solução da
+  // comunidade: plugin `cs2-fake-rcon` (Salvatore-Als/cs2-fake-rcon).
+  // Ele registra comandos custom `fake_rcon_password` e `fake_rcon <cmd>` que
+  // o RCON consegue executar (porque foram registrados pelo plugin, não pelo
+  // engine bugado). O plugin internamente executa o comando real.
+  //
+  // Setup: plugin Metamod instalado em game/csgo/addons/fake_rcon, e a senha
+  // do fake_rcon configurada no servidor via `fake_rcon_password <X>`.
+  // Esperamos que MATCH_SERVER_FAKE_RCON_PASS seja a senha que foi setada
+  // no plugin (pode ser igual à do RCON nativo, mas é separada).
+  //
+  // Modo de uso: ao invés de `sv_password "X"`, mandamos
+  // `fake_rcon ${fakePass} sv_password "X"` (ou padrão similar — confirmar
+  // sintaxe nos primeiros testes).
+  const fakePass = process.env.MATCH_SERVER_FAKE_RCON_PASS || rconPass;
+  // Helper que envolve cada comando real no wrapper do plugin
+  const wrap = (cmd) => `fake_rcon ${fakePass} ${cmd}`;
+
   try {
     await rcon.authenticate(rconPass);
-    console.log(`[match ${matchId}] RCON autenticado`);
+    console.log(`[match ${matchId}] RCON autenticado (usando fake_rcon wrapper)`);
 
     // 1. Mata partida em andamento (se houver) e força reset limpo
-    await rcon.execute('matchzy_kick_when_no_match_loaded 0');
+    await rcon.execute(wrap('matchzy_kick_when_no_match_loaded 0'));
 
     // 2. Define senha do servidor (só time vai conseguir conectar)
-    await rcon.execute(`sv_password "${password}"`);
+    await rcon.execute(wrap(`sv_password "${password}"`));
 
     // 3. Carrega match via URL — MatchZy puxa nosso JSON de config
     //    Ele que vai trocar mapa, mp_teamname, e gerenciar tudo.
-    const loadCmd = `matchzy_loadmatch_url "${configUrl}"`;
+    const loadCmd = wrap(`matchzy_loadmatch_url "${configUrl}"`);
     const loadResp = await rcon.execute(loadCmd);
     console.log(`[match ${matchId}] matchzy_loadmatch_url resposta:`, loadResp);
 
