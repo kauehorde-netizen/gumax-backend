@@ -21,7 +21,7 @@
 //   teamB: idem
 //   status: 'confirming' | 'mappick' | 'starting' | 'in_progress' | 'finished' | 'cancelled'
 //   confirmations: { uid: bool, ... }   // 10 entries
-//   confirmExpiresAt: Timestamp (90s)
+//   confirmExpiresAt: Timestamp (30s)
 //   mapVeto: {
 //     pool: ['de_mirage','de_inferno','de_dust2','de_nuke','de_anubis','de_ancient','de_train'],
 //     actions: [{ team:'A', action:'ban', map:'de_dust2', at:ts }, ...],
@@ -107,7 +107,7 @@ async function handleConfirm(event, matchId) {
   const expMs = data.confirmExpiresAt?.toMillis ? data.confirmExpiresAt.toMillis() : 0;
   if (expMs && expMs < Date.now()) {
     await ref.update({ status: 'cancelled', cancelReason: 'confirm_timeout' });
-    await releaseLockedLobbies(matchId);
+    await deleteLockedLobbies(matchId); // timeout → delete lobbies (recriar do zero)
     return json(409, { error: 'expired' });
   }
 
@@ -218,6 +218,38 @@ async function handleVeto(event, matchId) {
 //   MATCH_SERVER_RCON_PASS - senha do RCON (configurada no server.cfg)
 //   BACKEND_PUBLIC_URL     - URL pública do nosso backend (pra MatchZy chamar de volta)
 //   MATCHZY_WEBHOOK_SECRET - secret pra autenticar callbacks do MatchZy
+// Helper: DELETA lobbies travados (usado em confirm_timeout — usuários não
+// confirmaram a partida, melhor recriar do zero do que ficar com lobbies
+// "fantasma" + cancelDetail cacheado em loop). Inclui cleanup da subcollection
+// chat (Firestore não cascadeia delete automático).
+async function deleteLockedLobbies(matchId) {
+  try {
+    const db = admin.firestore();
+    const matchRef = db.collection('matches').doc(matchId);
+    const m = (await matchRef.get()).data();
+    if (!m) return;
+    const lobbyIds = [m.lobbyA, m.lobbyB].filter(Boolean);
+    for (const id of lobbyIds) {
+      const ref = db.collection('lobbies').doc(id);
+      const snap = await ref.get();
+      if (!snap.exists) continue;
+      // Apaga subcollection chat primeiro (até 500 msgs por batch)
+      try {
+        const chatSnap = await ref.collection('chat').limit(500).get();
+        if (!chatSnap.empty) {
+          const batch = db.batch();
+          chatSnap.docs.forEach(d => batch.delete(d.ref));
+          await batch.commit();
+        }
+      } catch (e) { /* tolera */ }
+      await ref.delete();
+      console.log(`[match ${matchId}] lobby ${id} DELETADO (timeout)`);
+    }
+  } catch (e) {
+    console.error(`[match ${matchId}] deleteLockedLobbies falhou:`, e.message);
+  }
+}
+
 // Helper: libera lobbies travados em 'in_match' apontando pra um match cancelado.
 // Permite users criarem novo desafio sem ficar em loop infinito de redirecionamento.
 async function releaseLockedLobbies(matchId) {
