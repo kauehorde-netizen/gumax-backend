@@ -962,3 +962,101 @@ async function handleAbort(event, matchId) {
   const m = snap.data();
 
   // Só pode abortar se ainda está em fluxo ativo (não acabou)
+  if (m.status === 'finished' || m.status === 'cancelled') {
+    return json(409, { error: 'match_already_ended', status: m.status });
+  }
+
+  // Verifica que user é parte do match
+  const inA = (m.teamA || []).some(p => p.uid === uid);
+  const inB = (m.teamB || []).some(p => p.uid === uid);
+  if (!inA && !inB) return json(403, { error: 'not_in_match' });
+
+  await ref.update({
+    status: 'cancelled',
+    cancelReason: 'aborted_by_player',
+    cancelDetail: 'Cancelada por ' + (decoded.name || uid),
+    cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  await releaseLockedLobbies(matchId);
+
+  console.log('[match ' + matchId + '] ABORTED por ' + uid);
+  return json(200, { success: true, status: 'cancelled' });
+}
+
+// ── POST /:id/guard-validate ────────────────────────────────────────
+async function handleGuardValidate(event, matchId) {
+  const decoded = await verifyIdToken(event.headers);
+  if (!decoded) return json(401, { error: 'unauthorized' });
+  const uid = decoded.uid;
+
+  let body;
+  try { body = JSON.parse(event.body || '{}'); }
+  catch { return json(400, { error: 'invalid_body' }); }
+
+  const steamIdLocal = body.steamIdLocal || body.steamId;
+  const hwid = body.hwid || null;
+  const guardVersion = body.guardVersion || 'unknown';
+
+  if (!steamIdLocal || !/^\d{17}$/.test(steamIdLocal)) {
+    return json(400, { error: 'invalid_steam_id' });
+  }
+
+  const db = admin.firestore();
+  const ref = db.collection('matches').doc(matchId);
+  const snap = await ref.get();
+  if (!snap.exists) return json(404, { error: 'match_not_found' });
+  const m = snap.data();
+  if (m.status !== 'in_progress' && m.status !== 'starting') {
+    return json(409, { error: 'match_not_ready', status: m.status });
+  }
+
+  const inA = (m.teamA || []).find(p => p.uid === uid);
+  const inB = (m.teamB || []).find(p => p.uid === uid);
+  if (!inA && !inB) return json(403, { error: 'not_in_match' });
+
+  if (uid !== steamIdLocal) {
+    try {
+      const userDoc = await db.collection('users').doc(uid).get();
+      const associatedSteamId = userDoc.exists ? userDoc.data()?.steamId : null;
+      if (associatedSteamId && associatedSteamId !== steamIdLocal) {
+        await ref.collection('guardLog').add({
+          uid, attemptedSteamId: steamIdLocal, expectedSteamId: associatedSteamId,
+          hwid, guardVersion, reason: 'steam_account_mismatch',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }).catch(() => {});
+        return json(403, {
+          error: 'steam_account_mismatch',
+          detail: 'A conta logada no Steam Client é diferente da conta do site. Faça login no Steam com a mesma conta usada no site.',
+        });
+      }
+    } catch {}
+  }
+
+  await ref.collection('guardLog').add({
+    uid, steamId: steamIdLocal, hwid, guardVersion,
+    result: 'passed',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  }).catch(() => {});
+
+  const ip = m.serverInfo?.ip;
+  const port = m.serverInfo?.port;
+  if (!ip || !port) {
+    return json(503, { error: 'server_not_ready' });
+  }
+
+  return json(200, {
+    ok: true,
+    ip, port,
+    steamConnectUrl: 'steam://connect/' + ip + ':' + port,
+    summary: {
+      matchId,
+      map: m.mapVeto?.finalMap || 'unknown',
+      team: inA ? 'A' : 'B',
+      teammates: (inA ? m.teamA : m.teamB || []).map(p => p.name).filter(Boolean),
+      opponents: (inA ? m.teamB : m.teamA || []).map(p => p.name).filter(Boolean),
+    },
+  });
+}
+
+exports.setupMatchServer = setupMatchServer;
+exports.aggregatePlayerStats = aggregatePlayerStats;
