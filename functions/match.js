@@ -107,6 +107,7 @@ async function handleConfirm(event, matchId) {
   const expMs = data.confirmExpiresAt?.toMillis ? data.confirmExpiresAt.toMillis() : 0;
   if (expMs && expMs < Date.now()) {
     await ref.update({ status: 'cancelled', cancelReason: 'confirm_timeout' });
+    await releaseLockedLobbies(matchId);
     return json(409, { error: 'expired' });
   }
 
@@ -217,6 +218,37 @@ async function handleVeto(event, matchId) {
 //   MATCH_SERVER_RCON_PASS - senha do RCON (configurada no server.cfg)
 //   BACKEND_PUBLIC_URL     - URL pública do nosso backend (pra MatchZy chamar de volta)
 //   MATCHZY_WEBHOOK_SECRET - secret pra autenticar callbacks do MatchZy
+// Helper: libera lobbies travados em 'in_match' apontando pra um match cancelado.
+// Permite users criarem novo desafio sem ficar em loop infinito de redirecionamento.
+async function releaseLockedLobbies(matchId) {
+  try {
+    const db = admin.firestore();
+    const matchRef = db.collection('matches').doc(matchId);
+    const m = (await matchRef.get()).data();
+    if (!m) return;
+    const lobbyIds = [m.lobbyA, m.lobbyB].filter(Boolean);
+    for (const id of lobbyIds) {
+      const ref = db.collection('lobbies').doc(id);
+      const snap = await ref.get();
+      if (!snap.exists) continue;
+      const data = snap.data();
+      const filled = (data.slots || []).filter(s => s != null).length;
+      const newStatus = filled >= 5 ? 'full' : 'open';
+      await ref.update({
+        status: newStatus,
+        matchId: null,
+        challengedBy: null,
+        challengeTo: null,
+        challengeExpiresAt: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.log(`[match ${matchId}] lobby ${id} liberado: status=${newStatus}`);
+    }
+  } catch (e) {
+    console.error(`[match ${matchId}] releaseLockedLobbies falhou:`, e.message);
+  }
+}
+
 async function setupMatchServer(matchId) {
   const db = admin.firestore();
   const ref = db.collection('matches').doc(matchId);
@@ -239,6 +271,7 @@ async function setupMatchServer(matchId) {
       cancelReason: 'server_misconfigured',
       cancelDetail: 'Missing env: ' + missing.join(', '),
     });
+    await releaseLockedLobbies(matchId);
     return;
   }
 
@@ -259,6 +292,7 @@ async function setupMatchServer(matchId) {
   } catch (err) {
     console.error('[match] rcon-srcds não instalado. npm install rcon-srcds');
     await ref.update({ status: 'cancelled', cancelReason: 'rcon_lib_missing' });
+    await releaseLockedLobbies(matchId);
     return;
   }
 
@@ -310,6 +344,7 @@ async function setupMatchServer(matchId) {
       cancelReason: 'rcon_failed',
       cancelDetail: err.message,
     });
+    await releaseLockedLobbies(matchId);
     return;
   }
 
