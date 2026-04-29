@@ -396,9 +396,9 @@ async function handleAcceptChallenge(event, lobbyId) {
       lobbyB: lobbyId,
       teamA, teamB,
       status: 'confirming',
-      // Cada jogador precisa confirmar em 90s. Default = false.
+      // Cada jogador precisa confirmar em 30s. Default = false.
       confirmations: [...teamA, ...teamB].reduce((acc, p) => { acc[p.uid] = false; return acc; }, {}),
-      confirmExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 90 * 1000),
+      confirmExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 30 * 1000),
       mapVeto: {
         pool: ['de_mirage','de_inferno','de_dust2','de_nuke','de_anubis','de_ancient','de_train'],
         actions: [],
