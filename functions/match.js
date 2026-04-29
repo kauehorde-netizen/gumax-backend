@@ -959,4 +959,31 @@ async function handleAbort(event, matchId) {
   if (!decoded) return json(401, { error: 'unauthorized' });
   const uid = decoded.uid;
 
-  cons
+  const db = admin.firestore();
+  const ref = db.collection('matches').doc(matchId);
+  const snap = await ref.get();
+  if (!snap.exists) return json(404, { error: 'match_not_found' });
+  const m = snap.data();
+
+  if (m.status === 'finished' || m.status === 'cancelled') {
+    return json(409, { error: 'match_already_ended', status: m.status });
+  }
+
+  const inA = (m.teamA || []).some(p => p.uid === uid);
+  const inB = (m.teamB || []).some(p => p.uid === uid);
+  if (!inA && !inB) return json(403, { error: 'not_in_match' });
+
+  await ref.update({
+    status: 'cancelled',
+    cancelReason: 'aborted_by_player',
+    cancelDetail: 'Cancelada por ' + (decoded.name || uid),
+    cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  await releaseLockedLobbies(matchId);
+
+  console.log('[match ' + matchId + '] ABORTED por ' + uid);
+  return json(200, { success: true, status: 'cancelled' });
+}
+
+exports.setupMatchServer = setupMatchServer;
+exports.aggregatePlayerStats = aggregatePlayerStats;
