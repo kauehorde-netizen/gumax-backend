@@ -488,4 +488,6 @@ app.listen(PORT, () => {
   console.log(`[Server] Gumax Skins API running on port ${PORT}`);
   console.log(`[Server] Routes: /api/catalog, /api/skin-detail, /api/skin-icon, /api/create-order, /api/check-pix`);
   console.log(`[Server] Credits: /api/credits/* , /api/analysis , /api/subscription/*`);
-  console.log(`[Server] Pricing: /api/skinport/* , /api/steam-market/* , /api/price-hist
+  console.log(`[Server] Pricing: /api/skinport/* , /api/steam-market/* , /api/price-history`);
+  console.log(`[Server] Admin: /api/admin/update-margins, /api/admin/add-stock, /api/admin/orders, /api/shield/process`);
+});
