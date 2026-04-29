@@ -288,6 +288,7 @@ app.get('/api/match/:id',       rateLimit(60000, 120), wrapHandler(matchHandler)
 app.get('/api/match/:id/matchzy-config', rateLimit(60000, 30), wrapHandler(matchHandler)); // público pro MatchZy
 app.post('/api/match/:id/confirm', rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/match/:id/veto',    rateLimit(60000, 30), wrapHandler(matchHandler));
+app.post('/api/match/:id/abort',   rateLimit(60000, 30), wrapHandler(matchHandler)); // v36-nopass: cancela match preso (any player)
 app.options('/api/match/*', (req, res) => res.sendStatus(204));
 
 // ── Inspect link resolver (busca link genérico do Steam Market pra skins sem ownership) ──
@@ -487,6 +488,4 @@ app.listen(PORT, () => {
   console.log(`[Server] Gumax Skins API running on port ${PORT}`);
   console.log(`[Server] Routes: /api/catalog, /api/skin-detail, /api/skin-icon, /api/create-order, /api/check-pix`);
   console.log(`[Server] Credits: /api/credits/* , /api/analysis , /api/subscription/*`);
-  console.log(`[Server] Pricing: /api/skinport/* , /api/steam-market/* , /api/price-history`);
-  console.log(`[Server] Admin: /api/admin/update-margins, /api/admin/add-stock, /api/admin/orders, /api/shield/process`);
-});
+  console.log(`[Server] Pricing: /api/skinport/* , /api/steam-market/* , /api/price-hist
