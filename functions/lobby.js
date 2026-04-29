@@ -51,6 +51,13 @@ const CORS = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Content-Type': 'application/json',
 };
+
+// Threshold de slots preenchidos pra status virar 'full' (e habilitar desafio).
+// Default 5 = comportamento normal 5v5. Pode ser reduzido via env var pra testes
+// (ex: LOBBY_FULL_THRESHOLD=1 permite testar 1v1 entre 2 contas).
+// REMOVER A ENV VAR depois do teste pra voltar ao comportamento padrão.
+const LOBBY_FULL_THRESHOLD = Math.max(1, Math.min(5, parseInt(process.env.LOBBY_FULL_THRESHOLD || '5', 10)));
+console.log('[Lobby] LOBBY_FULL_THRESHOLD =', LOBBY_FULL_THRESHOLD);
 function json(code, body) {
   return { statusCode: code, headers: CORS, body: JSON.stringify(body) };
 }
@@ -234,7 +241,7 @@ async function handleJoin(event, lobbyId) {
     tx.update(ref, {
       slots,
       memberUids: admin.firestore.FieldValue.arrayUnion(user.uid),
-      status: filled === 5 ? 'full' : 'open',
+      status: filled >= LOBBY_FULL_THRESHOLD ? 'full' : 'open',
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
   }).catch(e => {
