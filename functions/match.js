@@ -116,7 +116,9 @@ async function handleConfirm(event, matchId) {
     const f = fresh.data();
     if (f.status !== 'confirming') return; // alguém já avançou
     const confirmations = { ...(f.confirmations || {}), [uid]: true };
-    const allConfirmed = Object.values(confirmations).every(v => v === true) && Object.keys(confirmations).length === 10;
+    // Total esperado = todos os players de ambos os times (suporta debug 1v1 e padrão 5v5)
+    const totalExpected = (f.teamA || []).length + (f.teamB || []).length;
+    const allConfirmed = Object.values(confirmations).every(v => v === true) && Object.keys(confirmations).length === totalExpected;
     const update = { confirmations };
     if (allConfirmed) {
       update.status = 'mappick';
