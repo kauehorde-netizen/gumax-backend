@@ -93,31 +93,89 @@ async function getAuth(event) {
 
 // Limpa lobbies expirados — TTL absoluto de 20min desde createdAt.
 // Idempotente. Chamado a cada GET /list pra manter a coleção limpa
-// sem precisar de cron job. Se sala tem matchId (jogando), não toca.
-// Pra MVP (~30 docs total) o overhead é trivial.
+// sem precisar de cron job. Pra MVP (~30 docs total) o overhead é trivial.
+//
+// v37-cleanup: também limpa "matchId órfão" — sala cujo matchId aponta pra
+// partida que NÃO existe mais OU está cancelled/finished. Isso resolve casos
+// onde a sala ficou "presa" porque o release falhou (timeout, crash do
+// backend mid-update, etc). Zera o matchId pra liberar a sala. Se já tinha
+// passado dos 20min, deleta direto.
 async function cleanupStaleLobbies() {
   const db = admin.firestore();
   const cutoff = Date.now() - LOBBY_MAX_AGE_MS;
   const snap = await db.collection('lobbies').limit(200).get();
   const expired = [];
+  const orphans = [];
+
+  // Pre-fetch: pega todos matchIds únicos pra não fazer N queries seguidas
+  const matchIds = new Set();
+  snap.docs.forEach(d => { if (d.data().matchId) matchIds.add(d.data().matchId); });
+  const matchStatuses = {};
+  for (const mid of matchIds) {
+    try {
+      const ms = await db.collection('matches').doc(mid).get();
+      matchStatuses[mid] = ms.exists ? (ms.data().status || 'unknown') : 'missing';
+    } catch { matchStatuses[mid] = 'error'; }
+  }
+
   snap.docs.forEach(d => {
     const data = d.data();
-    // Não mexe em salas com partida em andamento (matchId set ou status in_match)
-    if (data.status === 'in_match' || data.matchId) return;
-    // createdAt pode não existir em docs muito antigos — fallback pra updatedAt
     const ageRefMs = data.createdAt?.toMillis ? data.createdAt.toMillis()
                    : data.updatedAt?.toMillis ? data.updatedAt.toMillis()
                    : null;
-    // Se não tem timestamp algum, ignora (segurança — não deleta sem prova de idade)
+    const ageMin = ageRefMs ? Math.round((Date.now() - ageRefMs)/60000) : -1;
+
+    // Caso 1: matchId aponta pra match que NÃO existe ou foi cancelled/finished
+    // → libera o lobby (zera matchId, status='open' ou 'full')
+    if (data.matchId) {
+      const matchStatus = matchStatuses[data.matchId];
+      if (matchStatus === 'missing' || matchStatus === 'cancelled' || matchStatus === 'finished') {
+        orphans.push({ ref: d.ref, id: d.id, matchId: data.matchId, matchStatus, ageMin, data });
+      }
+      // Se matchId aponta pra match ativa (in_progress/starting/mappick/confirming), respeitamos
+      return;
+    }
+    // Caso 2: status='in_match' mas SEM matchId — estado inválido. Trata como órfão.
+    if (data.status === 'in_match') {
+      orphans.push({ ref: d.ref, id: d.id, matchId: null, matchStatus: 'no_match', ageMin, data });
+      return;
+    }
+
+    // Caso 3: TTL absoluto 20min
     if (!ageRefMs) return;
-    if (ageRefMs < cutoff) expired.push({ ref: d.ref, id: d.id, ageMin: Math.round((Date.now() - ageRefMs)/60000) });
+    if (ageRefMs < cutoff) expired.push({ ref: d.ref, id: d.id, ageMin });
   });
+
+  // Aplica orphan release: zera matchId e seta status correto. Se também > 20min, deleta.
+  if (orphans.length) {
+    const batch = db.batch();
+    for (const o of orphans) {
+      // Se já passou dos 20 min, deleta direto (já tava abandonado)
+      if (o.ageMin >= 20) {
+        batch.delete(o.ref);
+        expired.push({ ref: o.ref, id: o.id, ageMin: o.ageMin });
+      } else {
+        const filled = (o.data.slots || []).filter(s => s != null).length;
+        const newStatus = filled >= 5 ? 'full' : 'open';
+        batch.update(o.ref, {
+          status: newStatus, matchId: null, challengedBy: null, challengeTo: null,
+          challengeExpiresAt: null, updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        console.log(`[lobby:cleanup] orphan released ${o.id} (matchId ${o.matchId}=${o.matchStatus}, ${o.ageMin}min) → status=${newStatus}`);
+      }
+    }
+    await batch.commit().catch(e => console.warn('[lobby:cleanup] orphan batch failed:', e.message));
+  }
+
   if (!expired.length) return 0;
   const batch = db.batch();
-  expired.forEach(e => batch.delete(e.ref));
+  // Filtra duplicados (orphans que viraram expired podem aparecer 2x se o array nao for único)
+  const seen = new Set();
+  const unique = expired.filter(e => seen.has(e.id) ? false : (seen.add(e.id), true));
+  unique.forEach(e => batch.delete(e.ref));
   await batch.commit();
-  console.log(`[lobby:cleanup] deleted ${expired.length} expired lobbies (>${LOBBY_MAX_AGE_MS/60000}min): ${expired.map(e => `${e.id}(${e.ageMin}min)`).join(', ')}`);
-  return expired.length;
+  console.log(`[lobby:cleanup] deleted ${unique.length} expired lobbies (>${LOBBY_MAX_AGE_MS/60000}min): ${unique.map(e => `${e.id}(${e.ageMin}min)`).join(', ')}`);
+  return unique.length;
 }
 
 // ───── POST /create — cria lobby novo (5 slots, owner ocupa o slot 0) ─────
@@ -427,59 +485,4 @@ async function handleAcceptChallenge(event, lobbyId) {
 
 // ───── POST /:id/decline-challenge ───────────────────────────────────────
 async function handleDeclineChallenge(event, lobbyId) {
-  const user = await getAuth(event);
-  if (!user) return json(401, { error: 'login_required' });
-  const db = admin.firestore();
-  const myRef = db.collection('lobbies').doc(lobbyId);
-  await db.runTransaction(async (tx) => {
-    const mine = await tx.get(myRef);
-    if (!mine.exists) throw new Error('not_found');
-    const me = mine.data();
-    if (me.ownerId !== user.uid) throw new Error('not_owner');
-    if (!me.challengedBy) return;
-    const otherRef = db.collection('lobbies').doc(me.challengedBy);
-    tx.update(otherRef, {
-      status: 'full', challengeTo: null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    tx.update(myRef, {
-      status: 'full', challengedBy: null, challengeExpiresAt: null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  });
-  return json(200, { ok: true });
-}
-
-// ─── Handler HTTP ────────────────────────────────────────────────────────
-exports.handler = async (event) => {
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
-
-  const path = event.path || '';
-  // Rota /api/lobby/list (GET)
-  if (event.httpMethod === 'GET' && path.endsWith('/list')) return handleList();
-  // Rota /api/lobby/mine (GET)
-  if (event.httpMethod === 'GET' && path.endsWith('/mine')) return handleGetMine(event);
-  // Rota /api/lobby/create (POST)
-  if (event.httpMethod === 'POST' && path.endsWith('/create')) return handleCreate(event);
-
-  // Rotas com lobbyId — extrai do path /api/lobby/{id}/{action}
-  const m = path.match(/\/api\/lobby\/([^/]+)(?:\/([^/]+))?$/);
-  if (!m) return json(404, { error: 'route_not_found', path });
-  const lobbyId = m[1];
-  const action = m[2] || '';
-
-  if (event.httpMethod === 'GET' && !action) return handleGetOne(event, lobbyId);
-  if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
-
-  switch (action) {
-    case 'join':              return handleJoin(event, lobbyId);
-    case 'leave':             return handleLeave(event, lobbyId);
-    case 'kick':              return handleKick(event, lobbyId);
-    case 'challenge':         return handleChallenge(event, lobbyId);
-    case 'accept-challenge':  return handleAcceptChallenge(event, lobbyId);
-    case 'decline-challenge': return handleDeclineChallenge(event, lobbyId);
-    default: return json(404, { error: 'unknown_action', action });
-  }
-};
-
-exports.cleanupStaleLobbies = cleanupStaleLobbies;
+  co
