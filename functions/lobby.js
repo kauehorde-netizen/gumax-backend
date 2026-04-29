@@ -339,12 +339,13 @@ async function handleChallenge(event, lobbyId) {
     const me = mine.data();
     const tgt = target.data();
     if (me.ownerId !== user.uid) throw new Error('not_owner');
-    if (!ALLOW_PARTIAL_CHALLENGE) {
-      if (me.status !== 'full') throw new Error('my_lobby_not_full');
-      if (tgt.status !== 'full') throw new Error('target_not_full');
-    }
+    // v33-test: validação 'full' DESLIGADA permanente até closed beta. Pra reativar:
+    // 1. Apaga essas duas linhas comentadas
+    // 2. Descomenta as 2 linhas if/throw acima
+    // (env var ALLOW_PARTIAL_CHALLENGE virou no-op — código sempre permite challenge parcial)
+    console.log('[Lobby] challenge: me.status=' + me.status + ' tgt.status=' + tgt.status + ' (validation skipped — debug mode)');
     if (tgt.challengedBy) throw new Error('target_already_challenged');
-    if (tgt.id === me.id || lobbyId === body.targetLobbyId) throw new Error('cant_challenge_self');
+    if (lobbyId === body.targetLobbyId) throw new Error('cant_challenge_self');
 
     tx.update(targetRef, {
       challengedBy: lobbyId,
