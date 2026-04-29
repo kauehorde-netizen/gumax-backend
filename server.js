@@ -289,6 +289,7 @@ app.get('/api/match/:id/matchzy-config', rateLimit(60000, 30), wrapHandler(match
 app.post('/api/match/:id/confirm', rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/match/:id/veto',    rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/match/:id/abort',   rateLimit(60000, 30), wrapHandler(matchHandler)); // v36-nopass: cancela match preso (any player)
+app.post('/api/match/:id/guard-validate', rateLimit(60000, 60), wrapHandler(matchHandler)); // GUARD desktop client → recebe IP/porta secretos
 app.options('/api/match/*', (req, res) => res.sendStatus(204));
 
 // ── Inspect link resolver (busca link genérico do Steam Market pra skins sem ownership) ──
