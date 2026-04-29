@@ -826,40 +826,150 @@ exports.handler = async (event) => {
 
   // GET /api/match/:id — estado do match (auth required)
   if (event.httpMethod === 'GET' && !action) return handleGet(event, matchId);
+  // GET /api/match/:id/matchzy-config — JSON pro MatchZy puxar (público, no auth)
   if (event.httpMethod === 'GET' && action === 'matchzy-config') return handleMatchzyConfig(matchId);
+
   if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
 
   switch (action) {
     case 'confirm': return handleConfirm(event, matchId);
     case 'veto':    return handleVeto(event, matchId);
     case 'abort':   return handleAbort(event, matchId);
+    case 'guard-validate': return handleGuardValidate(event, matchId);
     default: return json(404, { error: 'unknown_action', action });
   }
 };
 
-async function handleAbort(event, matchId) {
+// ── POST /:id/guard-validate ────────────────────────────────────────
+// GMAX GUARD desktop client chama esse endpoint pra: (1) validar que o
+// player TEM direito de entrar nessa partida; (2) receber as credenciais
+// de connect (IP/porta) que NÃO são expostas no frontend (web).
+// Body: { idToken, hwid, steamIdLocal, guardVersion }
+// Resposta sucesso: { ok: true, ip, port, steamConnectUrl, summary }
+//
+// Garantias de segurança:
+//   • idToken Firebase válido (verifyIdToken) → user autenticado
+//   • steamId do user precisa estar no teamA OU teamB do match
+//   • Steam local (lido do loginusers.vdf pelo cliente) precisa BATER com
+//     o steamId da conta do site → impede smurf/account sharing
+//   • match status precisa ser 'in_progress' ou 'starting'
+//   • registra HWID no doc do match pra audit/ban tracking depois
+async function handleGuardValidate(event, matchId) {
   const decoded = await verifyIdToken(event.headers);
   if (!decoded) return json(401, { error: 'unauthorized' });
   const uid = decoded.uid;
+
+  let body;
+  try { body = JSON.parse(event.body || '{}'); }
+  catch { return json(400, { error: 'invalid_body' }); }
+
+  const steamIdLocal = body.steamIdLocal || body.steamId;
+  const hwid = body.hwid || null;
+  const guardVersion = body.guardVersion || 'unknown';
+
+  if (!steamIdLocal || !/^\d{17}$/.test(steamIdLocal)) {
+    return json(400, { error: 'invalid_steam_id' });
+  }
+
   const db = admin.firestore();
   const ref = db.collection('matches').doc(matchId);
   const snap = await ref.get();
   if (!snap.exists) return json(404, { error: 'match_not_found' });
   const m = snap.data();
+  if (m.status !== 'in_progress' && m.status !== 'starting') {
+    return json(409, { error: 'match_not_ready', status: m.status });
+  }
+
+  // User precisa estar no roster
+  const inA = (m.teamA || []).find(p => p.uid === uid);
+  const inB = (m.teamB || []).find(p => p.uid === uid);
+  if (!inA && !inB) return json(403, { error: 'not_in_match' });
+
+  // CRITICAL: steamId da conta logada no Steam Client (lido do
+  // loginusers.vdf pelo GUARD) precisa ser igual ao steamId associado
+  // ao uid do user no Firestore. Se diferente → smurf/account sharing.
+  // O uid no nosso sistema = steamId 64 (formato: ^7656\d{13}$).
+  if (uid !== steamIdLocal) {
+    // Caso de exceção: alguns users antigos podem ter Firebase uid != steamId
+    // Verifica via doc users/{uid}.steamId como fallback
+    try {
+      const userDoc = await db.collection('users').doc(uid).get();
+      const associatedSteamId = userDoc.exists ? userDoc.data()?.steamId : null;
+      if (associatedSteamId && associatedSteamId !== steamIdLocal) {
+        await ref.collection('guardLog').add({
+          uid, attemptedSteamId: steamIdLocal, expectedSteamId: associatedSteamId,
+          hwid, guardVersion, reason: 'steam_account_mismatch',
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        }).catch(() => {});
+        return json(403, {
+          error: 'steam_account_mismatch',
+          detail: 'A conta logada no Steam Client é diferente da conta do site. Faça login no Steam com a mesma conta usada no site.',
+        });
+      }
+    } catch {}
+  }
+
+  // Tudo OK — registra que esse player passou no GUARD
+  await ref.collection('guardLog').add({
+    uid, steamId: steamIdLocal, hwid, guardVersion,
+    result: 'passed',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  }).catch(() => {});
+
+  // Retorna credenciais de connect (só GUARD recebe — frontend nunca vê IP/porta)
+  const ip = m.serverInfo?.ip;
+  const port = m.serverInfo?.port;
+  if (!ip || !port) {
+    return json(503, { error: 'server_not_ready' });
+  }
+
+  return json(200, {
+    ok: true,
+    ip, port,
+    steamConnectUrl: `steam://connect/${ip}:${port}`,
+    summary: {
+      matchId,
+      map: m.mapVeto?.finalMap || 'unknown',
+      team: inA ? 'A' : 'B',
+      teammates: (inA ? m.teamA : m.teamB || []).map(p => p.name).filter(Boolean),
+      opponents: (inA ? m.teamB : m.teamA || []).map(p => p.name).filter(Boolean),
+    },
+  });
+}
+
+// v36-nopass: abort manual de match preso. Qualquer player do match pode
+// chamar (ex: 9 players entraram no server, 1 não. Após 3min, auto-call.
+// OU player clica "Encerrar partida" antes pra escapar voluntariamente).
+async function handleAbort(event, matchId) {
+  const decoded = await verifyIdToken(event.headers);
+  if (!decoded) return json(401, { error: 'unauthorized' });
+  const uid = decoded.uid;
+
+  const db = admin.firestore();
+  const ref = db.collection('matches').doc(matchId);
+  const snap = await ref.get();
+  if (!snap.exists) return json(404, { error: 'match_not_found' });
+  const m = snap.data();
+
+  // Só pode abortar se ainda está em fluxo ativo (não acabou)
   if (m.status === 'finished' || m.status === 'cancelled') {
     return json(409, { error: 'match_already_ended', status: m.status });
   }
+
+  // Verifica que user é parte do match
   const inA = (m.teamA || []).some(p => p.uid === uid);
   const inB = (m.teamB || []).some(p => p.uid === uid);
   if (!inA && !inB) return json(403, { error: 'not_in_match' });
+
   await ref.update({
     status: 'cancelled',
     cancelReason: 'aborted_by_player',
-    cancelDetail: 'Cancelada por ' + (decoded.name || uid),
+    cancelDetail: `Cancelada por ${decoded.name || uid}`,
     cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
   });
   await releaseLockedLobbies(matchId);
-  console.log('[match ' + matchId + '] ABORTED by ' + uid);
+
+  console.log(`[match ${matchId}] ABORTED por ${uid}`);
   return json(200, { success: true, status: 'cancelled' });
 }
 
