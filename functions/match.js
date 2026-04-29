@@ -363,17 +363,20 @@ async function setupMatchServer(matchId) {
     // 1. Mata partida em andamento (se houver) e força reset limpo
     await rcon.execute(wrap('matchzy_kick_when_no_match_loaded 0'));
 
-    // 2. Carrega match via URL — MatchZy puxa nosso JSON de config (que JÁ
-    //    inclui sv_password nas cvars). Ele troca o mapa e aplica tudo.
+    // 2. v36-nopass: garante servidor SEM senha. Bug do cs2-fake-rcon parser
+    //    fazia `sv_password X` deixar a senha como literal (com aspas) —
+    //    causava "senha rejeitada pelo servidor". Mais simples: server aberto,
+    //    segurança via IP/porta não-públicos. Re-adicionar password depois.
+    await rcon.execute(wrap('sv_password ""'));
+    await rcon.execute(wrap('sv_password ;'));  // segundo reset (defensivo)
+
+    // 3. Carrega match via URL — MatchZy puxa nosso JSON de config.
     const loadCmd = wrap(`matchzy_loadmatch_url "${configUrl}"`);
     const loadResp = await rcon.execute(loadCmd);
     console.log(`[match ${matchId}] matchzy_loadmatch_url resposta:`, loadResp);
 
-    // 3. Setar sv_password DEPOIS do loadmatch (defesa em profundidade —
-    //    se MatchZy resetar a senha durante load, restauramos aqui).
-    //    SEM aspas no fake_rcon — parser do plugin pode mantê-las literalmente.
-    await rcon.execute(wrap(`sv_password ${password}`));
-    console.log(`[match ${matchId}] sv_password definida: ${password}`);
+    // 4. Reset sv_password DEPOIS do loadmatch também (caso MatchZy seta algo)
+    await rcon.execute(wrap('sv_password ""'));
 
     rcon.disconnect();
   } catch (err) {
@@ -388,13 +391,9 @@ async function setupMatchServer(matchId) {
     return;
   }
 
-  // Connect URL pros jogadores.
-  // v34-snappy fix: troca `steam://run/730//+connect...` por `steam://connect/IP:PORT/PASS`.
-  // Diferença crítica: `steam://run/730` SÓ aplica launch options se CS2 NÃO estiver rodando.
-  // Se já estiver aberto, Steam apenas foca a janela e ignora o `+connect`. O protocolo
-  // `steam://connect/...` força o connect mesmo com CS2 já aberto (mesmo modo do "Join Game"
-  // do Steam Friends). Funciona em CS:GO/CS2.
-  const connectUrl = `steam://connect/${ip}:${gamePort}/${password}`;
+  // Connect URL pros jogadores. v36-nopass: sem senha (server aberto), evita
+  // bug de rejeição da senha do cs2-fake-rcon. URL é `steam://connect/IP:PORT`.
+  const connectUrl = `steam://connect/${ip}:${gamePort}`;
   await ref.update({
     serverInfo: { ip, port: gamePort, password, connectUrl, configUrl, rconPort },
     status: 'in_progress',
@@ -439,10 +438,9 @@ async function handleMatchzyConfig(matchId) {
     players_per_team: 5,
     min_players_to_ready: 5,
     cvars: {
-      // v34-snappy fix: sv_password vai PRIMEIRO nas cvars pra MatchZy aplicar
-      // ao carregar o match. Sem isso, a senha que setamos via RCON pode ser
-      // resetada quando MatchZy carrega (causa "senha rejeitada pelo servidor").
-      sv_password: m.serverPassword || '',
+      // v36-nopass: sv_password vazio (server aberto) — workaround do bug
+      // cs2-fake-rcon que mantinha aspas literais. IP/porta não-públicos.
+      sv_password: '',
       // MatchZy chama essa URL no final da partida com stats completas
       matchzy_remote_log_url: `${backendUrl}/api/match/webhook`,
       matchzy_remote_log_header_key: 'X-MatchZy-Secret',
@@ -826,11 +824,8 @@ exports.handler = async (event) => {
   const matchId = m[1];
   const action = m[2] || '';
 
-  // GET /api/match/:id — estado do match (auth required)
   if (event.httpMethod === 'GET' && !action) return handleGet(event, matchId);
-  // GET /api/match/:id/matchzy-config — JSON pro MatchZy puxar (público, no auth)
   if (event.httpMethod === 'GET' && action === 'matchzy-config') return handleMatchzyConfig(matchId);
-
   if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
 
   switch (action) {
