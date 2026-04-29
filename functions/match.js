@@ -824,6 +824,7 @@ exports.handler = async (event) => {
   const matchId = m[1];
   const action = m[2] || '';
 
+  // GET /api/match/:id — estado do match (auth required)
   if (event.httpMethod === 'GET' && !action) return handleGet(event, matchId);
   if (event.httpMethod === 'GET' && action === 'matchzy-config') return handleMatchzyConfig(matchId);
   if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
