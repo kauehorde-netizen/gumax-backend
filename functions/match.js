@@ -307,8 +307,13 @@ async function setupMatchServer(matchId) {
     return;
   }
 
-  // Senha aleatória do servidor (jogadores recebem via connectUrl)
-  const password = 'gx_' + Math.random().toString(36).slice(2, 10);
+  // Senha aleatória do servidor (jogadores recebem via connectUrl).
+  // Salva no doc ANTES do RCON pra que handleMatchzyConfig consiga incluir
+  // sv_password no JSON (MatchZy só aplica cvars que vêm na config).
+  // v34-snappy fix: sem underscore na senha (cs2-fake-rcon parser tinha issue
+  // com chars especiais; alphanumérico puro é mais robusto).
+  const password = 'gx' + Math.random().toString(36).slice(2, 10).replace(/[^a-z0-9]/gi, '');
+  await ref.update({ serverPassword: password });
   const matchSnap = await ref.get();
   const m = matchSnap.data();
   const finalMap = m.mapVeto?.finalMap || 'de_mirage';
@@ -358,14 +363,17 @@ async function setupMatchServer(matchId) {
     // 1. Mata partida em andamento (se houver) e força reset limpo
     await rcon.execute(wrap('matchzy_kick_when_no_match_loaded 0'));
 
-    // 2. Define senha do servidor (só time vai conseguir conectar)
-    await rcon.execute(wrap(`sv_password "${password}"`));
-
-    // 3. Carrega match via URL — MatchZy puxa nosso JSON de config
-    //    Ele que vai trocar mapa, mp_teamname, e gerenciar tudo.
+    // 2. Carrega match via URL — MatchZy puxa nosso JSON de config (que JÁ
+    //    inclui sv_password nas cvars). Ele troca o mapa e aplica tudo.
     const loadCmd = wrap(`matchzy_loadmatch_url "${configUrl}"`);
     const loadResp = await rcon.execute(loadCmd);
     console.log(`[match ${matchId}] matchzy_loadmatch_url resposta:`, loadResp);
+
+    // 3. Setar sv_password DEPOIS do loadmatch (defesa em profundidade —
+    //    se MatchZy resetar a senha durante load, restauramos aqui).
+    //    SEM aspas no fake_rcon — parser do plugin pode mantê-las literalmente.
+    await rcon.execute(wrap(`sv_password ${password}`));
+    console.log(`[match ${matchId}] sv_password definida: ${password}`);
 
     rcon.disconnect();
   } catch (err) {
@@ -431,6 +439,10 @@ async function handleMatchzyConfig(matchId) {
     players_per_team: 5,
     min_players_to_ready: 5,
     cvars: {
+      // v34-snappy fix: sv_password vai PRIMEIRO nas cvars pra MatchZy aplicar
+      // ao carregar o match. Sem isso, a senha que setamos via RCON pode ser
+      // resetada quando MatchZy carrega (causa "senha rejeitada pelo servidor").
+      sv_password: m.serverPassword || '',
       // MatchZy chama essa URL no final da partida com stats completas
       matchzy_remote_log_url: `${backendUrl}/api/match/webhook`,
       matchzy_remote_log_header_key: 'X-MatchZy-Secret',
@@ -809,24 +821,4 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'GET' && playerMatch) return handlePlayerProfile(playerMatch[1]);
 
   // /api/match/:id e /api/match/:id/{action}
-  const m = path.match(/\/api\/match\/([^/]+)(?:\/([^/]+))?$/);
-  if (!m) return json(404, { error: 'route_not_found', path });
-  const matchId = m[1];
-  const action = m[2] || '';
-
-  // GET /api/match/:id — estado do match (auth required)
-  if (event.httpMethod === 'GET' && !action) return handleGet(event, matchId);
-  // GET /api/match/:id/matchzy-config — JSON pro MatchZy puxar (público, no auth)
-  if (event.httpMethod === 'GET' && action === 'matchzy-config') return handleMatchzyConfig(matchId);
-
-  if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
-
-  switch (action) {
-    case 'confirm': return handleConfirm(event, matchId);
-    case 'veto':    return handleVeto(event, matchId);
-    default: return json(404, { error: 'unknown_action', action });
-  }
-};
-
-exports.setupMatchServer = setupMatchServer;
-exports.aggregatePlayerStats = aggregatePlayerStats;
+  con
