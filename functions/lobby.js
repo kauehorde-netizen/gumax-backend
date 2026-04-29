@@ -58,6 +58,12 @@ const CORS = {
 // REMOVER A ENV VAR depois do teste pra voltar ao comportamento padrão.
 const LOBBY_FULL_THRESHOLD = Math.max(1, Math.min(5, parseInt(process.env.LOBBY_FULL_THRESHOLD || '5', 10)));
 console.log('[Lobby] LOBBY_FULL_THRESHOLD =', LOBBY_FULL_THRESHOLD);
+
+// Modo debug: permite challenge mesmo se status !== 'full'. Útil pra closed
+// beta com poucos amigos. Quando ativo, qualquer sala com pelo menos 1
+// jogador pode ser desafiada. REMOVER em produção real.
+const ALLOW_PARTIAL_CHALLENGE = process.env.MATCH_DEBUG_ALLOW_PARTIAL === '1';
+console.log('[Lobby] ALLOW_PARTIAL_CHALLENGE =', ALLOW_PARTIAL_CHALLENGE);
 function json(code, body) {
   return { statusCode: code, headers: CORS, body: JSON.stringify(body) };
 }
@@ -333,9 +339,12 @@ async function handleChallenge(event, lobbyId) {
     const me = mine.data();
     const tgt = target.data();
     if (me.ownerId !== user.uid) throw new Error('not_owner');
-    if (me.status !== 'full') throw new Error('my_lobby_not_full');
-    if (tgt.status !== 'full') throw new Error('target_not_full');
+    if (!ALLOW_PARTIAL_CHALLENGE) {
+      if (me.status !== 'full') throw new Error('my_lobby_not_full');
+      if (tgt.status !== 'full') throw new Error('target_not_full');
+    }
     if (tgt.challengedBy) throw new Error('target_already_challenged');
+    if (tgt.id === me.id || lobbyId === body.targetLobbyId) throw new Error('cant_challenge_self');
 
     tx.update(targetRef, {
       challengedBy: lobbyId,
