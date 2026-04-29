@@ -821,4 +821,24 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'GET' && playerMatch) return handlePlayerProfile(playerMatch[1]);
 
   // /api/match/:id e /api/match/:id/{action}
-  con
+  const m = path.match(/\/api\/match\/([^/]+)(?:\/([^/]+))?$/);
+  if (!m) return json(404, { error: 'route_not_found', path });
+  const matchId = m[1];
+  const action = m[2] || '';
+
+  // GET /api/match/:id — estado do match (auth required)
+  if (event.httpMethod === 'GET' && !action) return handleGet(event, matchId);
+  // GET /api/match/:id/matchzy-config — JSON pro MatchZy puxar (público, no auth)
+  if (event.httpMethod === 'GET' && action === 'matchzy-config') return handleMatchzyConfig(matchId);
+
+  if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
+
+  switch (action) {
+    case 'confirm': return handleConfirm(event, matchId);
+    case 'veto':    return handleVeto(event, matchId);
+    default: return json(404, { error: 'unknown_action', action });
+  }
+};
+
+exports.setupMatchServer = setupMatchServer;
+exports.aggregatePlayerStats = aggregatePlayerStats;
