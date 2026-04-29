@@ -380,8 +380,13 @@ async function setupMatchServer(matchId) {
     return;
   }
 
-  // Connect URL pros jogadores — `steam://run/730` abre CS2 e conecta direto.
-  const connectUrl = `steam://run/730//+connect%20${ip}:${gamePort}%20+password%20${password}`;
+  // Connect URL pros jogadores.
+  // v34-snappy fix: troca `steam://run/730//+connect...` por `steam://connect/IP:PORT/PASS`.
+  // Diferença crítica: `steam://run/730` SÓ aplica launch options se CS2 NÃO estiver rodando.
+  // Se já estiver aberto, Steam apenas foca a janela e ignora o `+connect`. O protocolo
+  // `steam://connect/...` força o connect mesmo com CS2 já aberto (mesmo modo do "Join Game"
+  // do Steam Friends). Funciona em CS:GO/CS2.
+  const connectUrl = `steam://connect/${ip}:${gamePort}/${password}`;
   await ref.update({
     serverInfo: { ip, port: gamePort, password, connectUrl, configUrl, rconPort },
     status: 'in_progress',
