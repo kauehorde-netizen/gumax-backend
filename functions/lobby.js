@@ -485,4 +485,55 @@ async function handleAcceptChallenge(event, lobbyId) {
 
 // ───── POST /:id/decline-challenge ───────────────────────────────────────
 async function handleDeclineChallenge(event, lobbyId) {
-  co
+  const user = await getAuth(event);
+  if (!user) return json(401, { error: 'login_required' });
+  const db = admin.firestore();
+  const myRef = db.collection('lobbies').doc(lobbyId);
+  await db.runTransaction(async (tx) => {
+    const mine = await tx.get(myRef);
+    if (!mine.exists) throw new Error('not_found');
+    const me = mine.data();
+    if (me.ownerId !== user.uid) throw new Error('not_owner');
+    if (!me.challengedBy) return;
+    const otherRef = db.collection('lobbies').doc(me.challengedBy);
+    tx.update(otherRef, {
+      status: 'full', challengeTo: null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    tx.update(myRef, {
+      status: 'full', challengedBy: null, challengeExpiresAt: null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+  return json(200, { ok: true });
+}
+
+// ─── Handler HTTP ────────────────────────────────────────────────────────
+exports.handler = async (event) => {
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
+
+  const path = event.path || '';
+  if (event.httpMethod === 'GET' && path.endsWith('/list')) return handleList();
+  if (event.httpMethod === 'GET' && path.endsWith('/mine')) return handleGetMine(event);
+  if (event.httpMethod === 'POST' && path.endsWith('/create')) return handleCreate(event);
+
+  const m = path.match(/\/api\/lobby\/([^/]+)(?:\/([^/]+))?$/);
+  if (!m) return json(404, { error: 'route_not_found', path });
+  const lobbyId = m[1];
+  const action = m[2] || '';
+
+  if (event.httpMethod === 'GET' && !action) return handleGetOne(event, lobbyId);
+  if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
+
+  switch (action) {
+    case 'join':              return handleJoin(event, lobbyId);
+    case 'leave':             return handleLeave(event, lobbyId);
+    case 'kick':              return handleKick(event, lobbyId);
+    case 'challenge':         return handleChallenge(event, lobbyId);
+    case 'accept-challenge':  return handleAcceptChallenge(event, lobbyId);
+    case 'decline-challenge': return handleDeclineChallenge(event, lobbyId);
+    default: return json(404, { error: 'unknown_action', action });
+  }
+};
+
+exports.cleanupStaleLobbies = cleanupStaleLobbies;
