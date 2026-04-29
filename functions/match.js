@@ -428,28 +428,38 @@ async function handleMatchzyConfig(matchId) {
 
   return json(200, {
     matchid: matchId,
-    team1: { name: 'Time A', players: team1Players },
-    team2: { name: 'Time B', players: team2Players },
+    team1: { name: 'Time A', tag: 'A', players: team1Players },
+    team2: { name: 'Time B', tag: 'B', players: team2Players },
     num_maps: 1,
     maplist: [m.mapVeto?.finalMap || 'de_mirage'],
-    map_sides: ['knife'],          // knife round decide os lados
+    // v37-team-fix: era 'knife' (round de faca decidia lado). Mudei pra 'team1_ct'
+    // pra Time A começar como CT direto (sem knife). Halftime troca os lados.
+    // Isso elimina a tela de escolha de team que aparecia entre o knife round.
+    map_sides: ['team1_ct'],
     spectators: { players: {} },
-    clinch_series: true,
+    clinch_series: false,            // 1 mapa só — não precisa de clinch
+    wingman: false,                  // 5v5 padrão
     players_per_team: 5,
     min_players_to_ready: 5,
+    skip_veto: true,                 // veto já foi feito no nosso site
     cvars: {
-      // v36-nopass: sv_password vazio (server aberto) — workaround do bug
-      // cs2-fake-rcon que mantinha aspas literais. IP/porta não-públicos.
-      sv_password: '',
-      // MatchZy chama essa URL no final da partida com stats completas
+      sv_password: '',               // server aberto (IP só pelo GUARD)
+      // ── Webhook stats no fim da partida ──
       matchzy_remote_log_url: `${backendUrl}/api/match/webhook`,
       matchzy_remote_log_header_key: 'X-MatchZy-Secret',
       matchzy_remote_log_header_value: webhookSecret,
-      // Configs padrão de competitivo
+      // ── v37-team-fix: força players nos times certos, sem auto-balance ──
+      mp_autoteambalance: 0,         // impede auto-balance que move players
+      mp_limitteams: 0,              // sem limite de tamanho (evita "team is full")
+      mp_match_can_clinch: 0,        // 1 mapa, sem necessidade
+      // ── Warmup curto pra galera não esperar muito ──
+      mp_warmup_pausetimer: 0,       // warmup roda direto, sem pause
+      mp_warmuptime: 30,             // 30s de warmup (pra todos entrarem)
+      // ── Configs padrão competitivo (MR12) ──
       mp_friendlyfire: 1,
       mp_overtime_enable: 1,
       mp_overtime_maxrounds: 6,
-      mp_maxrounds: 24,            // MR12 estilo Premier
+      mp_maxrounds: 24,              // MR12 estilo Premier
       mp_round_restart_delay: 5,
       sv_pausable: 1,
     },
@@ -952,26 +962,3 @@ async function handleAbort(event, matchId) {
   const m = snap.data();
 
   // Só pode abortar se ainda está em fluxo ativo (não acabou)
-  if (m.status === 'finished' || m.status === 'cancelled') {
-    return json(409, { error: 'match_already_ended', status: m.status });
-  }
-
-  // Verifica que user é parte do match
-  const inA = (m.teamA || []).some(p => p.uid === uid);
-  const inB = (m.teamB || []).some(p => p.uid === uid);
-  if (!inA && !inB) return json(403, { error: 'not_in_match' });
-
-  await ref.update({
-    status: 'cancelled',
-    cancelReason: 'aborted_by_player',
-    cancelDetail: `Cancelada por ${decoded.name || uid}`,
-    cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-  await releaseLockedLobbies(matchId);
-
-  console.log(`[match ${matchId}] ABORTED por ${uid}`);
-  return json(200, { success: true, status: 'cancelled' });
-}
-
-exports.setupMatchServer = setupMatchServer;
-exports.aggregatePlayerStats = aggregatePlayerStats;
