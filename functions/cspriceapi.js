@@ -140,6 +140,14 @@ async function saveToFirestoreCache(byName) {
   }
 }
 
+// ── Lê a API key aceitando AMBOS os nomes históricos ──────────────────────
+// Quando migramos Pricempire → CSPriceAPI, a env var no Railway permaneceu
+// com o nome legado (PRICEMPIRE_API_KEY). Aceita os dois pra evitar que a
+// integração quebre por causa do nome — a chave em si vale pra cspriceapi.com.
+function getCspriceKey() {
+  return process.env.CSPRICEAPI_KEY || process.env.PRICEMPIRE_API_KEY || '';
+}
+
 // ── Fetch ─────────────────────────────────────────────────────────────────
 // Busca catálogo de Youpin + Buff163 + C5Game em paralelo e mescla em
 // {market_hash_name → {youpin, buff, c5game, count, liquidity, ...}}.
@@ -169,7 +177,7 @@ async function fetchCSPriceItems() {
     return fsCache.data;
   }
   // 3) Fresh
-  const apiKey = process.env.CSPRICEAPI_KEY;
+  const apiKey = getCspriceKey();
   if (!apiKey) {
     console.warn('[CSPriceAPI] CSPRICEAPI_KEY não configurada');
     return global._cspriceCache?.data || {};
@@ -727,7 +735,7 @@ async function fetchFloatRangedData() {
     return global._floatRangedCache.data;
   }
 
-  const apiKey = process.env.CSPRICEAPI_KEY;
+  const apiKey = getCspriceKey();
   if (!apiKey) {
     console.warn('[CSPriceAPI] CSPRICEAPI_KEY não configurada (float-ranged)');
     return global._floatRangedCache?.data || [];
@@ -820,7 +828,7 @@ async function fetchYoupinBuyorders() {
     return global._youpinBuyorderCache.data;
   }
 
-  const apiKey = process.env.CSPRICEAPI_KEY;
+  const apiKey = getCspriceKey();
   if (!apiKey) {
     console.warn('[CSPriceAPI] CSPRICEAPI_KEY não configurada (buyorder)');
     return global._youpinBuyorderCache?.data || {};
@@ -959,7 +967,7 @@ async function getBluegemSales(marketHashName, pattern) {
   } catch (e) { /* sem cache disponível, segue */ }
 
   // Busca da API
-  const apiKey = process.env.CSPRICEAPI_KEY;
+  const apiKey = getCspriceKey();
   if (!apiKey) {
     console.warn('[bluegem] CSPRICEAPI_KEY ausente');
     return null;
@@ -1038,14 +1046,17 @@ exports.handler = async (event) => {
   // GET /api/pricempire/diag — healthcheck (sem auth) — diz se a API tá viva.
   // Útil pro user descobrir rápido se CSPRICEAPI_KEY tá faltando ou expirou.
   if (event.httpMethod === 'GET' && path.endsWith('/diag')) {
-    const hasKey = !!process.env.CSPRICEAPI_KEY;
+    const hasKey = !!getCspriceKey();
+    const keySource = process.env.CSPRICEAPI_KEY ? 'CSPRICEAPI_KEY'
+                    : process.env.PRICEMPIRE_API_KEY ? 'PRICEMPIRE_API_KEY (legado)'
+                    : null;
     const memCache = global._cspriceCache;
     const memCount = memCache?.data ? Object.keys(memCache.data).length : 0;
     const memAgeSec = memCache?.ts ? Math.round((Date.now() - memCache.ts) / 1000) : null;
     let probe = null;
     if (hasKey) {
       try {
-        const r = await httpsGet(CSPRICE_BASE + '/v1/account/usage', process.env.CSPRICEAPI_KEY, { timeout: 7000 });
+        const r = await httpsGet(CSPRICE_BASE + '/v1/account/usage', getCspriceKey(), { timeout: 7000 });
         probe = { status: r.status, sample: String(r.body || '').slice(0, 220) };
       } catch (e) {
         probe = { status: 'error', error: e.message };
@@ -1053,10 +1064,11 @@ exports.handler = async (event) => {
     }
     return json(200, {
       hasKey,
+      keySource,
       memCount,
       memAgeSec,
       probe,
-      hint: hasKey ? null : 'Configurar CSPRICEAPI_KEY nas env vars do Railway.',
+      hint: hasKey ? null : 'Configurar CSPRICEAPI_KEY (ou PRICEMPIRE_API_KEY legado) nas env vars do Railway.',
     });
   }
 
