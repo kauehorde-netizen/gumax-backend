@@ -1035,6 +1035,31 @@ exports.handler = async (event) => {
     return json(200, { query: q, count: items.length, items });
   }
 
+  // GET /api/pricempire/diag — healthcheck (sem auth) — diz se a API tá viva.
+  // Útil pro user descobrir rápido se CSPRICEAPI_KEY tá faltando ou expirou.
+  if (event.httpMethod === 'GET' && path.endsWith('/diag')) {
+    const hasKey = !!process.env.CSPRICEAPI_KEY;
+    const memCache = global._cspriceCache;
+    const memCount = memCache?.data ? Object.keys(memCache.data).length : 0;
+    const memAgeSec = memCache?.ts ? Math.round((Date.now() - memCache.ts) / 1000) : null;
+    let probe = null;
+    if (hasKey) {
+      try {
+        const r = await httpsGet(CSPRICE_BASE + '/v1/account/usage', process.env.CSPRICEAPI_KEY, { timeout: 7000 });
+        probe = { status: r.status, sample: String(r.body || '').slice(0, 220) };
+      } catch (e) {
+        probe = { status: 'error', error: e.message };
+      }
+    }
+    return json(200, {
+      hasKey,
+      memCount,
+      memAgeSec,
+      probe,
+      hint: hasKey ? null : 'Configurar CSPRICEAPI_KEY nas env vars do Railway.',
+    });
+  }
+
   if (event.httpMethod === 'GET' && path.endsWith('/by-category')) {
     const q = event.queryStringParameters || {};
     const type = String(q.type || '').toLowerCase();

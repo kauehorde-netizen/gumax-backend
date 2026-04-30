@@ -36,16 +36,47 @@ async function getItemPrices(marketHashName) {
   return getPricempireItem(marketHashName);
 }
 
+// Fallback: Steam Market priceoverview (gratuito, sem auth, rate-limit suave).
+// Retorna preço em BRL diretamente (currency=23 = BRL). Cacheado em memória 1h
+// pra não estourar rate limit em quotações em batch.
+const _steamPriceCache = new Map(); // name -> { brl, ts }
+const STEAM_PRICE_TTL = 60 * 60 * 1000;
+async function fetchSteamMarketBRL(marketHashName) {
+  const cached = _steamPriceCache.get(marketHashName);
+  if (cached && Date.now() - cached.ts < STEAM_PRICE_TTL) return cached.brl;
+  try {
+    const url = `https://steamcommunity.com/market/priceoverview/?currency=23&appid=730&market_hash_name=${encodeURIComponent(marketHashName)}`;
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' },
+    });
+    if (!r.ok) return 0;
+    const d = await r.json();
+    if (!d?.success) return 0;
+    // Steam retorna "R$ 1.234,56" — converte
+    const raw = String(d.lowest_price || d.median_price || '');
+    const m = raw.match(/[\d.,]+/);
+    if (!m) return 0;
+    // "1.234,56" → 1234.56
+    const brl = parseFloat(m[0].replace(/\./g, '').replace(',', '.'));
+    if (!Number.isFinite(brl) || brl <= 0) return 0;
+    _steamPriceCache.set(marketHashName, { brl, ts: Date.now() });
+    return brl;
+  } catch (e) {
+    console.warn('[buyback] Steam Market fallback err:', e.message);
+    return 0;
+  }
+}
+
 // Calcula proposta de compra pra UMA skin.
 // Retorna { name, youpinCNY, buffCNY, cheapestCNY, offerCNY, offerBRL, iconUrl }.
+//
+// FALLBACK: se CSPriceAPI não retornou preço (key não configurada / catálogo
+// vazio), tenta Steam Market priceoverview pra ainda dar uma cotação.
 async function quoteItem(marketHashName) {
   const item = await getItemPrices(marketHashName);
-  if (!item) return null;
-
   const { buildIconUrl } = require('./cspriceapi');
   const { getBaseFactor: getBaseFactorPricing } = require('./pricing');
 
-  // Helper defensivo — aceita número ou objeto {price, count}
   const extractPrice = (v) => {
     if (v == null) return 0;
     if (typeof v === 'number') return v > 0 ? v : 0;
@@ -57,26 +88,34 @@ async function quoteItem(marketHashName) {
     return 0;
   };
 
-  const youpinCNY = extractPrice(item.youpin);
-  const buffCNY   = extractPrice(item.buff);
-
-  // Menor preço entre Youpin e Buff (se um for 0, usa o outro)
+  const youpinCNY = item ? extractPrice(item.youpin) : 0;
+  const buffCNY   = item ? extractPrice(item.buff)   : 0;
   const available = [youpinCNY, buffCNY].filter(p => p > 0);
   const cheapestCNY = available.length ? Math.min(...available) : 0;
-
-  // Offer = 15% abaixo do mais barato
   const offerCNY = cheapestCNY > 0 ? cheapestCNY * 0.85 : 0;
-
-  // Converte pra BRL usando cotação base (sem margem)
   const factor = await getBaseFactorPricing();
-  const offerBRL = offerCNY > 0 ? Math.round(offerCNY * factor * 100) / 100 : 0;
+  let offerBRL = offerCNY > 0 ? Math.round(offerCNY * factor * 100) / 100 : 0;
+  let usedFallback = false;
+
+  // FALLBACK Steam Market quando CSPriceAPI vazio
+  if (offerBRL <= 0) {
+    const steamBRL = await fetchSteamMarketBRL(marketHashName);
+    if (steamBRL > 0) {
+      // Steam é o preço de mercado/lowest listing — pra recompra, oferta 15% abaixo
+      offerBRL = Math.round(steamBRL * 0.85 * 100) / 100;
+      usedFallback = true;
+    }
+  }
+
+  if (offerBRL <= 0) return null;  // realmente não temos preço de lugar nenhum
 
   return {
-    name: item.market_hash_name || marketHashName,
+    name: (item && item.market_hash_name) || marketHashName,
     youpinCNY, buffCNY, cheapestCNY,
     offerCNY, offerBRL,
-    cheapestSource: cheapestCNY === youpinCNY ? 'youpin' : 'buff',
-    iconUrl: buildIconUrl(item.icon),
+    cheapestSource: usedFallback ? 'steam_market' : (cheapestCNY === youpinCNY ? 'youpin' : 'buff'),
+    iconUrl: item ? buildIconUrl(item.icon) : '',
+    fallback: usedFallback || undefined,
   };
 }
 
