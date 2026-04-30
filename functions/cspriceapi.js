@@ -1072,6 +1072,49 @@ exports.handler = async (event) => {
     });
   }
 
+  // POST /api/pricempire/refresh-cache — limpa o cache (memória + Firestore) e
+  // força um fetch fresh dos 3 endpoints. Usado quando o cache foi populado
+  // com dados parciais (ex: só c5game funcionou na primeira vez).
+  if ((event.httpMethod === 'POST' || event.httpMethod === 'GET') && path.endsWith('/refresh-cache')) {
+    try {
+      // Limpa memória
+      global._cspriceCache = null;
+      // Limpa Firestore (apaga doc principal + chunks)
+      const admin = require('firebase-admin');
+      const db = admin.firestore();
+      const chunks = await db.collection(FIRESTORE_CACHE_DOC.col)
+        .doc(FIRESTORE_CACHE_DOC.id).collection('chunks').get();
+      const batch = db.batch();
+      chunks.forEach(d => batch.delete(d.ref));
+      batch.delete(db.collection(FIRESTORE_CACHE_DOC.col).doc(FIRESTORE_CACHE_DOC.id));
+      await batch.commit();
+      // Força fresh fetch agora
+      const t0 = Date.now();
+      const items = await fetchCSPriceItems();
+      const elapsed = Date.now() - t0;
+      // Conta items com cada source preenchido pra confirmar dados completos
+      const stats = { youpin: 0, buff: 0, c5game: 0, all3: 0, only_c5: 0 };
+      for (const item of Object.values(items)) {
+        const hasY = parsePrice(item.youpin) > 0;
+        const hasB = parsePrice(item.buff) > 0;
+        const hasC = parsePrice(item.c5game) > 0;
+        if (hasY) stats.youpin++;
+        if (hasB) stats.buff++;
+        if (hasC) stats.c5game++;
+        if (hasY && hasB && hasC) stats.all3++;
+        if (hasC && !hasY && !hasB) stats.only_c5++;
+      }
+      return json(200, {
+        ok: true,
+        elapsedMs: elapsed,
+        totalItems: Object.keys(items).length,
+        breakdown: stats,
+      });
+    } catch (e) {
+      return json(500, { error: e.message });
+    }
+  }
+
   // GET /api/pricempire/diag-sources — testa cada fonte (youpin, buff163, c5game)
   // INDIVIDUALMENTE pra descobrir qual está falhando. Mostra status HTTP, número
   // de items, primeiros nomes, e erro completo se falhar.

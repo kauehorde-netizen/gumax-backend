@@ -307,6 +307,8 @@ app.get('/api/pricempire/search', rateLimit(60000, 60), wrapHandler(pricempireHa
 app.get('/api/pricempire/by-category', rateLimit(60000, 30), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/diag', rateLimit(60000, 30), wrapHandler(pricempireHandler));
 app.get('/api/pricempire/diag-sources', rateLimit(60000, 10), wrapHandler(pricempireHandler));
+app.get('/api/pricempire/refresh-cache', rateLimit(60000, 5), wrapHandler(pricempireHandler));
+app.post('/api/pricempire/refresh-cache', rateLimit(60000, 5), wrapHandler(pricempireHandler));
 app.post('/api/pricempire/item', rateLimit(60000, 60), wrapHandler(pricempireHandler));
 // Trader Pro features (CSPriceAPI): float ranged + youpin buyorder + análise overpay
 app.get('/api/pricempire/float-ranged', rateLimit(60000, 60), wrapHandler(pricempireHandler));
