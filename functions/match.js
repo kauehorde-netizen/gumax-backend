@@ -23,10 +23,10 @@
 //   confirmations: { uid: bool, ... }   // 10 entries
 //   confirmExpiresAt: Timestamp (30s)
 //   mapVeto: {
-//     pool: ['de_mirage','de_inferno','de_dust2','de_nuke','de_anubis','de_ancient','de_train'],
+//     pool: ['de_mirage','de_inferno','de_dust2','de_nuke','de_anubis','de_ancient','de_cache','de_train'],
 //     actions: [{ team:'A', action:'ban', map:'de_dust2', at:ts }, ...],
 //     activeTeam: 'A' | 'B',
-//     turn: 0..6,           // 0..3 ban (alternado, A first), 4 pick, 5 ban, 6 pick (final)
+//     turn: 0..7,           // 0..6 = bans alternados (A começa e encerra), 7 = mapa final
 //     finalMap: 'de_mirage' | null,
 //   }
 //   serverInfo: { ip, port, password, connectUrl } | null
@@ -59,8 +59,10 @@ function json(code, body) {
 }
 
 // ── Sequência oficial de pick/ban pra 5v5 (estilo CS2 Premiere/Faceit):
-//    A:ban → B:ban → A:ban → B:ban → A:ban → B:ban → último mapa restante = pick
-//    7 mapas → 6 bans → 1 sobra
+//    A:ban → B:ban → A:ban → B:ban → A:ban → B:ban → A:ban → último mapa restante = pick
+//    8 mapas (Cache adicionado em 28/abr/2026) → 7 bans → 1 sobra
+//    A inicia E encerra (4 bans pra A, 3 pra B). Time A = challenger; pequena
+//    vantagem pra quem "puxou" o desafio. Aceitável em casual; rotacionar em fase 2.
 // Pra simplificar UI, capitão = owner do lobby. Em fase 2 podemos rotacionar.
 const VETO_SEQUENCE = [
   { team: 'A', action: 'ban' },
@@ -69,7 +71,8 @@ const VETO_SEQUENCE = [
   { team: 'B', action: 'ban' },
   { team: 'A', action: 'ban' },
   { team: 'B', action: 'ban' },
-  // turn 6: mapa restante vira pick automaticamente (não tem ação do capitão)
+  { team: 'A', action: 'ban' },
+  // turn 7: mapa restante vira pick automaticamente (não tem ação do capitão)
 ];
 
 // ── Carrega match com auth check de membership ───
@@ -966,9 +969,11 @@ async function handleGuardValidate(event, matchId) {
   return json(200, {
     ok: true,
     ip, port,
-    steamConnectUrl: 'steam://connect/' + ip + ':' + port,
-    steamRunGameUrl: 'steam://rungameid/730/+connect%20' + ip + ':' + port,
-    connectCommand: 'connect ' + ip + ':' + port,
+    steamConnectUrl: `steam://connect/${ip}:${port}`,
+    // v37-connect-fix: fallback launch URL (funciona se CS2 não tá aberto)
+    steamRunGameUrl: `steam://rungameid/730/+connect%20${ip}:${port}`,
+    // Comando manual pro user colar no console do CS2 (fallback garantido)
+    connectCommand: `connect ${ip}:${port}`,
     summary: {
       matchId,
       map: m.mapVeto?.finalMap || 'unknown',
@@ -979,29 +984,39 @@ async function handleGuardValidate(event, matchId) {
   });
 }
 
+// v36-nopass: abort manual de match preso. Qualquer player do match pode
+// chamar (ex: 9 players entraram no server, 1 não. Após 3min, auto-call.
+// OU player clica "Encerrar partida" antes pra escapar voluntariamente).
 async function handleAbort(event, matchId) {
   const decoded = await verifyIdToken(event.headers);
   if (!decoded) return json(401, { error: 'unauthorized' });
   const uid = decoded.uid;
+
   const db = admin.firestore();
   const ref = db.collection('matches').doc(matchId);
   const snap = await ref.get();
   if (!snap.exists) return json(404, { error: 'match_not_found' });
   const m = snap.data();
+
+  // Só pode abortar se ainda está em fluxo ativo (não acabou)
   if (m.status === 'finished' || m.status === 'cancelled') {
     return json(409, { error: 'match_already_ended', status: m.status });
   }
+
+  // Verifica que user é parte do match
   const inA = (m.teamA || []).some(p => p.uid === uid);
   const inB = (m.teamB || []).some(p => p.uid === uid);
   if (!inA && !inB) return json(403, { error: 'not_in_match' });
+
   await ref.update({
     status: 'cancelled',
     cancelReason: 'aborted_by_player',
-    cancelDetail: 'Cancelada por ' + (decoded.name || uid),
+    cancelDetail: `Cancelada por ${decoded.name || uid}`,
     cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
   });
   await releaseLockedLobbies(matchId);
-  console.log('[match ' + matchId + '] ABORTED por ' + uid);
+
+  console.log(`[match ${matchId}] ABORTED por ${uid}`);
   return json(200, { success: true, status: 'cancelled' });
 }
 
