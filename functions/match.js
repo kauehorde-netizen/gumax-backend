@@ -368,12 +368,19 @@ async function setupMatchServer(matchId) {
     // e o player entrava no mapa errado.
     if (finalMap && /^[a-z0-9_]+$/i.test(finalMap)) {
       const shortMap = finalMap.replace(/^de_/, '');
+      // v38-mapfix v4: ordem invertida — changelevel primeiro (DatHost usa
+      // Local/Official Maps, mapas locais bundled). Workshop só pra hosts
+      // com host_workshop_collection. matchzy é última opção.
+      //
+      // Heurística de sucesso: resposta com keyword de erro = falha clara,
+      // próximo candidate. Resposta vazia ou normal = trata como sucesso
+      // (CS2 RCON tipicamente NÃO retorna stdout em changelevel quando ok).
       const errorPatterns = /couldn['’]?t load|cant find|can['’]?t find|missing|not found|invalid map|unknown command|map.*not.*available|no\s+such\s+map/i;
 
       const candidates = [
+        { cmd: `changelevel ${finalMap}`, label: 'legacy' },
         { cmd: `ds_workshop_changelevel ${shortMap}`, label: 'workshop' },
         { cmd: `matchzy_changemap ${finalMap}`, label: 'matchzy' },
-        { cmd: `changelevel ${finalMap}`, label: 'legacy' },
       ];
 
       let mapChanged = false;
@@ -382,14 +389,14 @@ async function setupMatchServer(matchId) {
         try {
           const resp = await rcon.execute(wrap(cmd));
           const respStr = String(resp || '').trim();
-          console.log(`[match ${matchId}] map-change [${label}] "${cmd}" → resp: ${respStr.slice(0, 300)}`);
+          console.log(`[match ${matchId}] map-change [${label}] "${cmd}" → resp(${respStr.length}b): ${respStr.slice(0, 300)}`);
           if (errorPatterns.test(respStr)) {
             lastErr = `[${label}] ${respStr.slice(0, 200)}`;
             console.warn(`[match ${matchId}] tentativa ${label} REJEITADA: ${respStr.slice(0, 200)}`);
             continue;
           }
           mapChanged = true;
-          console.log(`[match ${matchId}] map-change SUCESSO via ${label}`);
+          console.log(`[match ${matchId}] map-change SUCESSO via ${label} (resp ${respStr.length === 0 ? 'vazia' : 'normal'})`);
           break;
         } catch (e) {
           lastErr = `[${label}] ${e.message}`;
@@ -410,14 +417,23 @@ async function setupMatchServer(matchId) {
         return;
       }
 
-      // Aguarda 6s pro mapa carregar (workshop maps precisam descompactar)
-      await new Promise(r => setTimeout(r, 6000));
+      // Aguarda 8s pro mapa carregar (changelevel CS2 demora pra terminar)
+      await new Promise(r => setTimeout(r, 8000));
     }
 
     // 4. Carrega match via URL — MatchZy puxa nosso JSON de config.
+    // v38-mapfix v4: se MatchZy responder "Match load failed", o servidor não
+    // conseguiu fazer GET no nosso configUrl OU o JSON está malformado pro
+    // MatchZy. Loga URL pra debug.
+    console.log(`[match ${matchId}] configUrl: ${configUrl}`);
     const loadCmd = wrap(`matchzy_loadmatch_url "${configUrl}"`);
     const loadResp = await rcon.execute(loadCmd);
-    console.log(`[match ${matchId}] matchzy_loadmatch_url resposta:`, loadResp);
+    const loadRespStr = String(loadResp || '').trim();
+    console.log(`[match ${matchId}] matchzy_loadmatch_url resp(${loadRespStr.length}b): ${loadRespStr.slice(0, 500)}`);
+    if (/match load failed|invalid config|json.*error|parse.*error/i.test(loadRespStr)) {
+      console.error(`[match ${matchId}] MATCHZY REJEITOU O CONFIG! URL=${configUrl}`);
+      // Não cancela ainda — o user pode usar comandos manuais. Mas alerta.
+    }
 
     // 5. Reset sv_password DEPOIS do loadmatch (defensivo).
     await rcon.execute(wrap('sv_password ""'));
