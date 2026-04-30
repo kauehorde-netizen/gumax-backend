@@ -243,7 +243,7 @@ async function handleBuy(event) {
     ? body.numbers.map(n => parseInt(n, 10)).filter(n => Number.isInteger(n) && n > 0)
     : null;
   const qty = requestedNumbers ? requestedNumbers.length : parseInt(body.qty, 10);
-  if (!qty || qty < 2) return json(400, { error: 'invalid_qty', message: 'Mínimo 2 bilhetes por compra' });
+  if (!qty || qty < 1) return json(400, { error: 'invalid_qty', message: 'Mínimo 1 bilhete por compra' });
   if (qty > 100) return json(400, { error: 'invalid_qty', message: 'Máximo 100 bilhetes por compra' });
   if (requestedNumbers && new Set(requestedNumbers).size !== requestedNumbers.length) {
     return json(400, { error: 'duplicate_numbers', message: 'Há números duplicados na seleção' });
