@@ -654,9 +654,10 @@ function matchesCategory(name, type) {
   const hasWear = /\((Factory New|Minimal Wear|Field-Tested|Well-Worn|Battle-Scarred)\)$/.test(name);
   if (!hasWear) return false;
   if (!name.includes(' | ')) return false;
-  if (/^StatTrak™\s/.test(name)) return false;
-  if (/^★\s+StatTrak™\s/.test(name)) return false;
-  if (/^Souvenir\s+/.test(name)) return false;
+  // ANTES: filtrava out StatTrak™ e Souvenir agressivamente — isso fazia
+  // categorias (especialmente Faca/Luva) parecerem vazias porque a maioria
+  // dos top-sellers caros é StatTrak. AGORA: inclui as variantes; o frontend
+  // tem dropdown Variante (Normal/StatTrak/Souvenir) pra filtrar se quiser.
   if (type === 'knife')  return matchesKnifeBE(name);
   if (type === 'gloves') return matchesGlovesBE(name);
   if (WEAPON_CLASSES_BE[type]) return matchesWeaponClass(name, type);
