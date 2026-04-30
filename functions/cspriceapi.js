@@ -1068,7 +1068,56 @@ exports.handler = async (event) => {
       return json(400, { error: 'type must be one of: ' + ALLOWED.join(', ') });
     }
     const limit = Math.min(120, Math.max(1, parseInt(q.limit, 10) || 80));
-    const items = await getItemsByCategory(type, limit);
+    let items = await getItemsByCategory(type, limit);
+    // FALLBACK: CSPriceAPI vazia (sem key/cataloga) → busca YouPin direto + filtra pela categoria
+    if (items.length === 0) {
+      console.warn(`[by-category ${type}] CSPriceAPI vazia — caindo pra YouPin direto`);
+      try {
+        const { fetchYoupinTopSellersDirect } = require('./youpin-proxy');
+        const direct = await fetchYoupinTopSellersDirect(300); // pega bastante e filtra
+        const matchType = (name) => {
+          const bare = name.replace(/^StatTrak™\s*/, '').replace(/^Souvenir\s+/, '').replace(/^★\s*/, '').replace(/^★ StatTrak™\s*/, '');
+          if (type === 'knife')   return name.startsWith('★ ') && !matchesGlovesBE(name);
+          if (type === 'gloves')  return matchesGlovesBE(name);
+          if (type === 'sticker') return /^Sticker\s*\|/i.test(name) || /^Sealed\s+Graffiti/i.test(name);
+          if (type === 'charm')   return /^Charm\s*\|/i.test(name);
+          if (type === 'agent')   return false; // agents não vêm no top-sellers do youpin
+          return matchesWeaponClass(name, type);
+        };
+        let factor = 0.78, baseFactor = 0.78;
+        try {
+          const { getConversionFactor, getBaseFactor } = require('./pricing');
+          [factor, baseFactor] = await Promise.all([getConversionFactor(), getBaseFactor()]);
+        } catch {}
+        const bymykelMap = await loadBymykelImages().catch(() => null);
+        const filtered = direct.filter(it => it.name && matchType(it.name)).slice(0, limit);
+        items = filtered.map(it => {
+          let iconUrl = it.iconUrl || '';
+          if (iconUrl && !iconUrl.startsWith('http') && !iconUrl.includes('/')) {
+            iconUrl = `https://community.cloudflare.steamstatic.com/economy/image/${iconUrl}/256fx256f`;
+          }
+          if (!iconUrl && bymykelMap) {
+            iconUrl = resolveImageFromBymykel(bymykelMap, it.name) || '';
+          }
+          const cny = it.price_cny || 0;
+          return {
+            name: it.name,
+            price_cny: cny,
+            steam_price_cny: cny * 1.35,
+            originalBRL: cny > 0 ? Math.round(cny * 1.35 * baseFactor * 100) / 100 : 0,
+            saleBRL: cny > 0 ? Math.round(cny * factor * 100) / 100 : 0,
+            rarity: '',
+            type,
+            iconUrl,
+            source: 'youpin_direct_category',
+          };
+        });
+        if (bymykelMap) applyImageFallback(items, bymykelMap, `category-${type}-fallback`);
+        console.log(`[by-category ${type}] fallback YouPin direto: ${items.length} items`);
+      } catch (e) {
+        console.error(`[by-category ${type}] fallback err:`, e.message);
+      }
+    }
     return json(200, { type, count: items.length, items });
   }
 
@@ -1146,3 +1195,6 @@ exports.suggestSkins = suggestSkins;
 exports.getTopSellers = getTopSellers;
 exports.getItemsByCategory = getItemsByCategory;
 exports.searchCatalog = searchCatalog;
+exports.loadBymykelImages = loadBymykelImages;
+exports.resolveImageFromBymykel = resolveImageFromBymykel;
+exports.applyImageFallbackPublic = applyImageFallback;

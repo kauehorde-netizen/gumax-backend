@@ -24,13 +24,12 @@ async function fetchYoupinTopSellers(limit = 50) {
     return global._youpinTopCache.data.slice(0, limit);
   }
 
+  // ── Caminho 1: CSPriceAPI (preferido — preço Youpin + Buff + saleBRL calculado)
+  let all = [];
   try {
-    // Migrado pra CSPriceAPI (mesma signature). Pricempire descontinuado.
     const { getTopSellers } = require('./cspriceapi');
     const top = await getTopSellers(limit);
-    // Inclui saleBRL/originalBRL que o pricempire já calcula com a config de pricing.
-    // Frontend usa esses valores pra exibir preço final + strikethrough.
-    const all = top.map(it => ({
+    all = top.map(it => ({
       name: it.name,
       price_cny: it.price_cny,
       steam_price_cny: it.steam_price_cny,
@@ -42,19 +41,80 @@ async function fetchYoupinTopSellers(limit = 50) {
       tradeable: true,
       rarity: it.rarity,
       type: it.type,
-      source: 'pricempire',
+      source: 'cspriceapi',
     }));
-    // Só cacheia se tiver dados — array vazio = falha mascarada, não cacheia.
-    if (all.length > 0) {
-      global._youpinTopCache = { data: all, ts: Date.now(), limit };
-    } else {
-      console.warn('[Top sellers] pricempire devolveu 0 items — NÃO cacheando');
-    }
-    return all;
   } catch (e) {
-    console.error('[Top sellers] pricempire error:', e.message, e.stack);
-    return [];
+    console.error('[Top sellers] cspriceapi error:', e.message);
   }
+
+  // ── Caminho 2 (FALLBACK): direto no YouPin898 quando CSPriceAPI falha/vazia
+  // Garante que a home/categorias funcionam mesmo sem CSPRICEAPI_KEY configurada.
+  if (all.length === 0) {
+    console.warn('[Top sellers] cspriceapi vazia — caindo pro fetchYoupinTopSellersDirect');
+    try {
+      const direct = await fetchYoupinTopSellersDirect(limit);
+      // Calcula preço BRL com fator + resolve imagem via ByMykel
+      let factor = 0.78, baseFactor = 0.78;
+      try {
+        const { getConversionFactor, getBaseFactor } = require('./pricing');
+        [factor, baseFactor] = await Promise.all([getConversionFactor(), getBaseFactor()]);
+      } catch (e) {
+        console.warn('[Top sellers] pricing module err — usando fator 0.78:', e.message);
+      }
+      let bymykelMap = null;
+      try {
+        const { loadBymykelImages } = require('./cspriceapi');
+        bymykelMap = await loadBymykelImages();
+      } catch {}
+      const { resolveImageFromBymykel } = (() => {
+        try { return require('./cspriceapi'); } catch { return {}; }
+      })();
+      all = direct.map(it => {
+        // YouPin retorna iconUrl como hash Steam — montamos a URL completa
+        let iconUrl = it.iconUrl || '';
+        if (iconUrl && !iconUrl.startsWith('http') && !iconUrl.includes('/')) {
+          iconUrl = `https://community.cloudflare.steamstatic.com/economy/image/${iconUrl}/256fx256f`;
+        }
+        // Se imagem do YouPin veio vazia, tenta ByMykel pelo nome
+        if (!iconUrl && bymykelMap && resolveImageFromBymykel) {
+          iconUrl = resolveImageFromBymykel(bymykelMap, it.name) || '';
+        }
+        const cny = it.price_cny || 0;
+        const saleBRL = cny > 0 ? Math.round(cny * factor * 100) / 100 : 0;
+        const originalBRL = cny > 0 ? Math.round(cny * 1.35 * baseFactor * 100) / 100 : 0;
+        return {
+          name: it.name,
+          price_cny: cny,
+          steam_price_cny: cny * 1.35,
+          originalBRL,
+          saleBRL,
+          onSale: it.onSale || 0,
+          total: it.total || 0,
+          iconUrl,
+          tradeable: it.tradeable !== false,
+          rarity: '',
+          type: '',
+          source: 'youpin_direct',
+        };
+      });
+      console.log(`[Top sellers] fallback YouPin direto: ${all.length} items`);
+    } catch (e) {
+      console.error('[Top sellers] YouPin direct fallback err:', e.message);
+    }
+  }
+
+  // Pós-processamento universal: aplica image fallback (StatTrak via Normal)
+  if (all.length > 0) {
+    try {
+      const { loadBymykelImages, applyImageFallbackPublic } = require('./cspriceapi');
+      const bymykelMap = await loadBymykelImages().catch(() => null);
+      if (applyImageFallbackPublic) applyImageFallbackPublic(all, bymykelMap, 'top-sellers-merged');
+    } catch {}
+    global._youpinTopCache = { data: all, ts: Date.now(), limit };
+  } else {
+    console.warn('[Top sellers] AMBOS caminhos falharam — sem itens');
+  }
+  return all;
 }
 
 // Força reset do cache. Útil quando Pricempire teve erro e cacheou vazio.
