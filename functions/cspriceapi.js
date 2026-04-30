@@ -527,6 +527,18 @@ function resolveImageFromBymykel(map, fullName) {
   variants.add(fullName.replace(/^StatTrak™\s*/, '').trim());
   variants.add(fullName.replace(/^★\s*StatTrak™\s*/, '').trim());
   variants.add(fullName.replace(/^Souvenir\s+/, '').trim());
+
+  // CRÍTICO: pra facas/luvas StatTrak™/Souvenir, ByMykel cataloga COM ★ (sem
+  // o StatTrak/Souvenir). Ex: "★ StatTrak™ Karambit | Fade (FN)" precisa virar
+  // "★ Karambit | Fade" / "★ Karambit | Fade (FN)" pra bater no map.
+  // Sem essas variantes, todo card de faca StatTrak vinha sem imagem (placeholder).
+  const knifeStripStat = fullName.replace(/^★\s*StatTrak™\s*/, '★ ').trim();
+  variants.add(knifeStripStat);
+  variants.add(knifeStripStat.replace(/\s*\([^)]+\)\s*$/, '').trim());
+  const knifeStripSouv = fullName.replace(/^★\s*Souvenir\s+/, '★ ').trim();
+  variants.add(knifeStripSouv);
+  variants.add(knifeStripSouv.replace(/\s*\([^)]+\)\s*$/, '').trim());
+
   const fullyStripped = fullName
     .replace(/^Souvenir\s+/, '')
     .replace(/^★\s*/, '')
