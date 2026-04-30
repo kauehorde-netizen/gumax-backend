@@ -1072,6 +1072,37 @@ exports.handler = async (event) => {
     });
   }
 
+  // GET /api/pricempire/diag-sources — testa cada fonte (youpin, buff163, c5game)
+  // INDIVIDUALMENTE pra descobrir qual está falhando. Mostra status HTTP, número
+  // de items, primeiros nomes, e erro completo se falhar.
+  if (event.httpMethod === 'GET' && path.endsWith('/diag-sources')) {
+    const apiKey = getCspriceKey();
+    if (!apiKey) return json(400, { error: 'no API key configured' });
+    const results = {};
+    for (const source of ['youpin', 'buff163', 'c5game']) {
+      const url = `${CSPRICE_BASE}/v1/prices/${source}`;
+      try {
+        const t0 = Date.now();
+        const r = await httpsGet(url, apiKey, { timeout: 25000 });
+        const elapsed = Date.now() - t0;
+        let parsed = null;
+        try { parsed = JSON.parse(r.body); } catch {}
+        results[source] = {
+          httpStatus: r.status,
+          elapsedMs: elapsed,
+          dataCount: Array.isArray(parsed?.data) ? parsed.data.length : 0,
+          plan: parsed?.plan || null,
+          requestor: parsed?.requestor || null,
+          firstName: parsed?.data?.[0]?.market_hash_name || null,
+          error: r.status !== 200 ? String(r.body || '').slice(0, 400) : null,
+        };
+      } catch (e) {
+        results[source] = { error: e.message };
+      }
+    }
+    return json(200, { tested: 'youpin, buff163, c5game', results });
+  }
+
   if (event.httpMethod === 'GET' && path.endsWith('/by-category')) {
     const q = event.queryStringParameters || {};
     const type = String(q.type || '').toLowerCase();
