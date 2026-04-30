@@ -388,7 +388,7 @@ async function searchCatalog(query, limit = 200, minPriceCNY = 1, maxPriceCNY = 
 
   const bymykelMap = await loadBymykelImages();
 
-  return top.map(x => {
+  const result = top.map(x => {
     const steamEstCNY = x.youpin * 1.35; // CSPriceAPI não retorna Steam — extrapola Youpin × 1.35
     const icon = resolveImageFromBymykel(bymykelMap, x.name);
     return {
@@ -404,6 +404,8 @@ async function searchCatalog(query, limit = 200, minPriceCNY = 1, maxPriceCNY = 
       source: 'cspriceapi_search',
     };
   });
+  applyImageFallback(result, bymykelMap, 'search');
+  return result;
 }
 
 // Top sellers — ordena por liquidity (do Youpin) que é o melhor proxy de
@@ -457,7 +459,7 @@ async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
 
   const bymykelMap = await loadBymykelImages();
 
-  return top.map(x => {
+  const result = top.map(x => {
     const steamEstCNY = x.youpin * 1.35;
     const icon = resolveImageFromBymykel(bymykelMap, x.name);
     return {
@@ -475,6 +477,54 @@ async function getTopSellers(limit = 50, minPriceCNY = 3, maxPriceCNY = 20000) {
       source: 'cspriceapi',
     };
   });
+
+  applyImageFallback(result, bymykelMap, 'top-sellers');
+  return result;
+}
+
+// ── Skin base = nome sem StatTrak™/Souvenir/wear, MANTÉM ★ pra facas/luvas ─
+// Usado pra agrupar variantes da mesma skin (que compartilham imagem).
+function baseSkinKey(name) {
+  if (!name) return '';
+  return name
+    .replace(/^Souvenir\s+/, '')
+    .replace(/^★\s*StatTrak™\s*/, '★ ')
+    .replace(/^StatTrak™\s*/, '')
+    .replace(/\s*\([^)]+\)\s*$/, '')
+    .trim();
+}
+
+// ── Aplica fallback de imagem in-place num array de items ─────────────────
+// 1ª passada: pra cada item sem iconUrl, busca outro item do mesmo array com
+// a mesma skin base (skins StatTrak/Souvenir compartilham imagem da Normal).
+// 2ª passada: tenta direto no ByMykel a chave base e a chave-sem-★ (cobre
+// caso em que a Normal não veio no response mas existe no ByMykel).
+function applyImageFallback(items, bymykelMap, label = 'items') {
+  if (!Array.isArray(items) || !items.length) return;
+  const baseImageMap = {};
+  for (const it of items) {
+    if (!it.iconUrl) continue;
+    const k = baseSkinKey(it.name);
+    if (k && !baseImageMap[k]) baseImageMap[k] = it.iconUrl;
+  }
+  let resolvedFromMap = 0, resolvedFromBymykelBase = 0;
+  for (const it of items) {
+    if (it.iconUrl) continue;
+    const k = baseSkinKey(it.name);
+    if (k && baseImageMap[k]) {
+      it.iconUrl = baseImageMap[k];
+      resolvedFromMap++;
+      continue;
+    }
+    if (k && bymykelMap) {
+      const noStar = k.replace(/^★\s*/, '').trim();
+      if (bymykelMap[k]) { it.iconUrl = bymykelMap[k]; resolvedFromBymykelBase++; continue; }
+      if (bymykelMap[noStar]) { it.iconUrl = bymykelMap[noStar]; resolvedFromBymykelBase++; continue; }
+    }
+  }
+  if (resolvedFromMap || resolvedFromBymykelBase) {
+    console.log(`[image fallback ${label}] +${resolvedFromMap} from response, +${resolvedFromBymykelBase} from ByMykel base`);
+  }
 }
 
 function inferTypeFromName(name) {
@@ -635,12 +685,14 @@ async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY
 
   const bymykelMap = await loadBymykelImages();
 
-  const enriched = [];
-  for (const x of top) {
+  // ANTES: items sem icon eram filtrados out (`if (!icon) continue;`) — isso
+  // descartava silenciosamente todas as facas StatTrak™ que o ByMykel não
+  // cataloga, fazendo a categoria parecer vazia. AGORA: inclui sempre e
+  // applyImageFallback resolve depois (1ª via response, 2ª via ByMykel base).
+  const enriched = top.map(x => {
     const icon = resolveImageFromBymykel(bymykelMap, x.name);
-    if (!icon) continue;
     const steamEstCNY = x.youpin * 1.35;
-    enriched.push({
+    return {
       name: x.name,
       price_cny: x.youpin,
       steam_price_cny: steamEstCNY,
@@ -650,8 +702,9 @@ async function getItemsByCategory(type, limit = 80, minPriceCNY = 1, maxPriceCNY
       type: type,
       iconUrl: icon,
       source: 'cspriceapi_category',
-    });
-  }
+    };
+  });
+  applyImageFallback(enriched, bymykelMap, `category-${type}`);
   return enriched;
 }
 
