@@ -458,7 +458,7 @@ async function handleAcceptChallenge(event, lobbyId) {
       confirmations: [...teamA, ...teamB].reduce((acc, p) => { acc[p.uid] = false; return acc; }, {}),
       confirmExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 30 * 1000),
       mapVeto: {
-        pool: ['de_mirage','de_inferno','de_dust2','de_nuke','de_anubis','de_ancient','de_train'],
+        pool: ['de_mirage','de_inferno','de_dust2','de_nuke','de_anubis','de_ancient','de_cache','de_train'],
         actions: [],
         activeTeam: 'A',
         finalMap: null,
@@ -513,10 +513,14 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
 
   const path = event.path || '';
+  // Rota /api/lobby/list (GET)
   if (event.httpMethod === 'GET' && path.endsWith('/list')) return handleList();
+  // Rota /api/lobby/mine (GET)
   if (event.httpMethod === 'GET' && path.endsWith('/mine')) return handleGetMine(event);
+  // Rota /api/lobby/create (POST)
   if (event.httpMethod === 'POST' && path.endsWith('/create')) return handleCreate(event);
 
+  // Rotas com lobbyId — extrai do path /api/lobby/{id}/{action}
   const m = path.match(/\/api\/lobby\/([^/]+)(?:\/([^/]+))?$/);
   if (!m) return json(404, { error: 'route_not_found', path });
   const lobbyId = m[1];
