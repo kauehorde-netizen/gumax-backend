@@ -91,9 +91,16 @@ async function getAuth(event) {
   };
 }
 
+// v38-throttle: cache de execução pra reduzir reads do Firestore.
+// Antes o cleanup rodava em TODA chamada de /list (~150 reads cada). Com
+// polling de 6s e 5 users abertos = 75 cleanups/min × 150 = 11k reads/min.
+// Agora roda no MÁXIMO 1x por minuto. Estado é in-memory na instância do
+// Railway — em deploy/restart reseta, sem problema.
+let _lastCleanupAt = 0;
+const CLEANUP_COOLDOWN_MS = 60 * 1000;
+
 // Limpa lobbies expirados — TTL absoluto de 20min desde createdAt.
-// Idempotente. Chamado a cada GET /list pra manter a coleção limpa
-// sem precisar de cron job. Pra MVP (~30 docs total) o overhead é trivial.
+// Idempotente. Chamado por GET /list (com throttle de 60s).
 //
 // v37-cleanup: também limpa "matchId órfão" — sala cujo matchId aponta pra
 // partida que NÃO existe mais OU está cancelled/finished. Isso resolve casos
@@ -101,6 +108,10 @@ async function getAuth(event) {
 // backend mid-update, etc). Zera o matchId pra liberar a sala. Se já tinha
 // passado dos 20min, deleta direto.
 async function cleanupStaleLobbies() {
+  // v38-throttle: pula se rodou há menos de 60s
+  if (Date.now() - _lastCleanupAt < CLEANUP_COOLDOWN_MS) return 0;
+  _lastCleanupAt = Date.now();
+
   const db = admin.firestore();
   const cutoff = Date.now() - LOBBY_MAX_AGE_MS;
   const snap = await db.collection('lobbies').limit(200).get();
