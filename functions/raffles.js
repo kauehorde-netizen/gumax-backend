@@ -577,6 +577,17 @@ async function handleAdminDraw(event) {
     tx.delete(raffleRef);
   });
 
+  // Notifica WhatsApp (vencedor + admin) — best effort
+  try {
+    const wa = require('./whatsapp-notify');
+    await wa.notifyRaffleWinner(
+      { id: historyRef.id, prizeName: raffle.prizeName || raffle.title || 'Skin' },
+      { name: winner.steamName, whatsapp: winner.whatsapp, ticketNumber: winner.number }
+    );
+  } catch (e) {
+    console.warn('[Raffles draw] WA notify err:', e.message);
+  }
+
   return json(200, {
     ok: true,
     winner: {

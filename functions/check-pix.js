@@ -99,6 +99,15 @@ exports.handler = async (event) => {
           });
 
           console.log(`[CheckPix] Order ${orderId} marked as paid`);
+
+          // Notifica via WhatsApp (cliente + admin) — try/catch isolado pra
+          // não derrubar a confirmação do pagamento se a notificação falhar.
+          try {
+            const wa = require('./whatsapp-notify');
+            await wa.notifyOrderPaid({ ...orderData, orderId, status: 'paid' });
+          } catch (e) {
+            console.warn('[CheckPix] WhatsApp notify error:', e.message);
+          }
         }
       } catch (e) {
         console.error('[CheckPix] Status update error:', e.message);

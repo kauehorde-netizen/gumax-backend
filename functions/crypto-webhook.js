@@ -114,6 +114,17 @@ exports.handler = async (event) => {
     if (internalStatus === 'paid') update.paidAt = new Date().toISOString();
     await orderRef.update(update);
     console.log(`[Crypto webhook] order ${orderId} updated → ${internalStatus}`);
+
+    // Notifica WhatsApp se virou paid (best effort)
+    if (internalStatus === 'paid') {
+      try {
+        const wa = require('./whatsapp-notify');
+        await wa.notifyOrderPaid({ ...cur, ...update, orderId });
+      } catch (e) {
+        console.warn('[Crypto webhook] WA notify err:', e.message);
+      }
+    }
+
     return { statusCode: 200, headers: CORS, body: JSON.stringify({ ok: true, orderId, status: internalStatus }) };
   } catch (e) {
     console.error('[Crypto webhook] firestore error:', e.message);
