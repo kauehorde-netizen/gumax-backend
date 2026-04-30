@@ -339,34 +339,38 @@ async function setupMatchServer(matchId) {
   console.log(`[match ${matchId}] RCON ${ip}:${rconPort} → setup match com mapa ${finalMap}`);
   const rcon = new Rcon({ host: ip, port: rconPort, timeout: 5000 });
 
-  // ── WORKAROUND CS2 RCON BUG ──
-  // RCON nativo do CS2 está disfuncional desde o lançamento — muitos comandos
-  // de engine não executam (sv_password, changelevel, etc). Solução da
-  // comunidade: plugin `cs2-fake-rcon` (Salvatore-Als/cs2-fake-rcon).
-  // Ele registra comandos custom `fake_rcon_password` e `fake_rcon <cmd>` que
-  // o RCON consegue executar (porque foram registrados pelo plugin, não pelo
-  // engine bugado). O plugin internamente executa o comando real.
+  // ── RCON wrapper (com ou sem fake_rcon) ──
   //
-  // Setup: plugin Metamod instalado em game/csgo/addons/fake_rcon, e a senha
-  // do fake_rcon configurada no servidor via `fake_rcon_password <X>`.
-  // Esperamos que MATCH_SERVER_FAKE_RCON_PASS seja a senha que foi setada
-  // no plugin (pode ser igual à do RCON nativo, mas é separada).
+  // CONTEXTO HISTÓRICO:
+  // RCON nativo do CS2 sofreu de bugs em hosts antigos (Glibhost) — muitos
+  // comandos de engine não executavam (sv_password, changelevel, etc). A
+  // gambiarra era usar plugin `cs2-fake-rcon` (Salvatore-Als) que registra
+  // comandos custom `fake_rcon <pass> <cmd>` que o RCON aceita e o plugin
+  // executa internamente.
   //
-  // Modo de uso: ao invés de `sv_password "X"`, mandamos
-  // `fake_rcon ${fakePass} sv_password "X"` (ou padrão similar — confirmar
-  // sintaxe nos primeiros testes).
+  // PROBLEMA: o plugin precisa da senha setada via `fake_rcon_password <X>`
+  // no .cfg do server. Se a senha do plugin não bate com a env var, TODOS
+  // os comandos falham silenciosamente — nada é executado.
+  //
+  // SOLUÇÃO v38-rcon-mode: hosts modernos (DatHost) têm RCON nativo
+  // funcional, então tornamos o fake_rcon wrapper OPCIONAL via env var.
+  // Default = false (RCON nativo direto). Se algum host voltar a ter o
+  // bug, basta setar MATCH_SERVER_USE_FAKE_RCON=true e configurar a senha
+  // no .cfg do servidor.
+  const USE_FAKE_RCON = process.env.MATCH_SERVER_USE_FAKE_RCON === 'true';
   const fakePass = process.env.MATCH_SERVER_FAKE_RCON_PASS || rconPass;
-  // Helper que envolve cada comando real no wrapper do plugin
-  const wrap = (cmd) => `fake_rcon ${fakePass} ${cmd}`;
+  const wrap = USE_FAKE_RCON
+    ? (cmd) => `fake_rcon ${fakePass} ${cmd}`
+    : (cmd) => cmd;
 
   try {
     await rcon.authenticate(rconPass);
-    console.log(`[match ${matchId}] RCON autenticado (usando fake_rcon wrapper)`);
+    console.log(`[match ${matchId}] RCON autenticado (mode=${USE_FAKE_RCON ? 'fake_rcon' : 'native'})`);
 
     // 1. Reset config + permite player conectar mesmo sem match carregado
     await rcon.execute(wrap('matchzy_kick_when_no_match_loaded 0'));
 
-    // 2. Server SEM senha (workaround cs2-fake-rcon parser bug).
+    // 2. Server SEM senha (player conecta via steam://connect/ip:port direto).
     await rcon.execute(wrap('sv_password ""'));
 
     // 3. Trocar mapa pro picado no veto.
@@ -1003,5 +1007,4 @@ async function handleGuardValidate(event, matchId) {
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
         }).catch(() => {});
         return json(403, {
-          error: 'steam_account_mismatch',
-          detail: 'A conta logada no Steam Client é diferente
+          error: 'steam_accoun
