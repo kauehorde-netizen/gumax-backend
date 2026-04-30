@@ -369,18 +369,76 @@ async function setupMatchServer(matchId) {
     // 2. Server SEM senha (workaround cs2-fake-rcon parser bug).
     await rcon.execute(wrap('sv_password ""'));
 
-    // 3. v37-mapfix v2: changelevel pro mapa correto ANTES do loadmatch.
-    //    Player que entrar no servidor já cai no mapa certo, sem warmup
-    //    no startup map. MatchZy depois consome o config no novo mapa.
+    // 3. Trocar mapa pro picado no veto.
+    //
+    // v38-mapfix v3: USER REPORTOU "qualquer mapa que ganhe sempre inicia em
+    //   Dust 2". Significa que `changelevel de_xxx` está sendo ignorado em
+    //   TODOS os casos, não só Cache. Causa quase certa: o servidor CS2 do
+    //   Glibhost usa **workshop collection** (modo padrão hoje pra CS2 com
+    //   Active Duty oficial). Em server com workshop collection, o comando
+    //   `changelevel de_mirage` falha silenciosamente — o correto é:
+    //
+    //     ds_workshop_changelevel mirage    (sem o "de_" prefix)
+    //
+    //   Estratégia: tenta 3 comandos em ordem, parando no primeiro que parecer
+    //   ter funcionado (resposta sem keywords de erro). Loga TUDO no Railway
+    //   pra debug. Depois, espera 6s pro mapa carregar (era 3s, curto demais
+    //   pra workshop maps que precisam descompactar).
     if (finalMap && /^[a-z0-9_]+$/i.test(finalMap)) {
-      try {
-        await rcon.execute(wrap(`changelevel ${finalMap}`));
-        console.log(`[match ${matchId}] changelevel: ${finalMap}`);
-        // Aguarda 3s pro mapa carregar antes de mandar loadmatch
-        await new Promise(r => setTimeout(r, 3000));
-      } catch (e) {
-        console.warn(`[match ${matchId}] changelevel falhou:`, e.message);
+      // Strip prefixo "de_" pra workshop_changelevel
+      const shortMap = finalMap.replace(/^de_/, '');
+
+      // Detecção de erro genérica (qualquer um desses substrings = falha)
+      const errorPatterns = /couldn['’]?t load|cant find|can['’]?t find|missing|not found|invalid map|unknown command|map.*not.*available|no\s+such\s+map/i;
+
+      const candidates = [
+        // 1ª tentativa: workshop changelevel (mais comum em CS2 hoje)
+        { cmd: `ds_workshop_changelevel ${shortMap}`, label: 'workshop' },
+        // 2ª tentativa: matchzy mostly works for any map config
+        { cmd: `matchzy_changemap ${finalMap}`, label: 'matchzy' },
+        // 3ª tentativa: legacy changelevel (server com mapas locais)
+        { cmd: `changelevel ${finalMap}`, label: 'legacy' },
+      ];
+
+      let mapChanged = false;
+      let lastErr = '';
+      for (const { cmd, label } of candidates) {
+        try {
+          const resp = await rcon.execute(wrap(cmd));
+          const respStr = String(resp || '').trim();
+          console.log(`[match ${matchId}] map-change [${label}] "${cmd}" → resp: ${respStr.slice(0, 300)}`);
+
+          if (errorPatterns.test(respStr)) {
+            lastErr = `[${label}] ${respStr.slice(0, 200)}`;
+            console.warn(`[match ${matchId}] tentativa ${label} REJEITADA: ${respStr.slice(0, 200)}`);
+            continue; // tenta próximo
+          }
+          // Sem keyword de erro → assume sucesso
+          mapChanged = true;
+          console.log(`[match ${matchId}] map-change SUCESSO via ${label}`);
+          break;
+        } catch (e) {
+          lastErr = `[${label}] ${e.message}`;
+          console.warn(`[match ${matchId}] tentativa ${label} EXCEPTION: ${e.message}`);
+          // RCON pode desconectar ao trocar mapa — tenta reautenticar pra próxima
+          try { await rcon.authenticate(rconPass); } catch {}
+        }
       }
+
+      if (!mapChanged) {
+        console.error(`[match ${matchId}] TODAS tentativas de troca de mapa falharam: ${lastErr}`);
+        try { rcon.disconnect(); } catch {}
+        await ref.update({
+          status: 'cancelled',
+          cancelReason: 'map_change_failed',
+          cancelDetail: `Servidor não conseguiu trocar pro mapa "${finalMap}". Última falha: ${lastErr}`,
+        });
+        await releaseLockedLobbies(matchId);
+        return;
+      }
+
+      // Aguarda 6s pro mapa carregar (workshop maps precisam descompactar)
+      await new Promise(r => setTimeout(r, 6000));
     }
 
     // 4. Carrega match via URL — MatchZy puxa nosso JSON de config.
@@ -946,79 +1004,4 @@ async function handleGuardValidate(event, matchId) {
         }).catch(() => {});
         return json(403, {
           error: 'steam_account_mismatch',
-          detail: 'A conta logada no Steam Client é diferente da conta do site. Faça login no Steam com a mesma conta usada no site.',
-        });
-      }
-    } catch {}
-  }
-
-  // Tudo OK — registra que esse player passou no GUARD
-  await ref.collection('guardLog').add({
-    uid, steamId: steamIdLocal, hwid, guardVersion,
-    result: 'passed',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-  }).catch(() => {});
-
-  // Retorna credenciais de connect (só GUARD recebe — frontend nunca vê IP/porta)
-  const ip = m.serverInfo?.ip;
-  const port = m.serverInfo?.port;
-  if (!ip || !port) {
-    return json(503, { error: 'server_not_ready' });
-  }
-
-  return json(200, {
-    ok: true,
-    ip, port,
-    steamConnectUrl: `steam://connect/${ip}:${port}`,
-    // v37-connect-fix: fallback launch URL (funciona se CS2 não tá aberto)
-    steamRunGameUrl: `steam://rungameid/730/+connect%20${ip}:${port}`,
-    // Comando manual pro user colar no console do CS2 (fallback garantido)
-    connectCommand: `connect ${ip}:${port}`,
-    summary: {
-      matchId,
-      map: m.mapVeto?.finalMap || 'unknown',
-      team: inA ? 'A' : 'B',
-      teammates: (inA ? m.teamA : m.teamB || []).map(p => p.name).filter(Boolean),
-      opponents: (inA ? m.teamB : m.teamA || []).map(p => p.name).filter(Boolean),
-    },
-  });
-}
-
-// v36-nopass: abort manual de match preso. Qualquer player do match pode
-// chamar (ex: 9 players entraram no server, 1 não. Após 3min, auto-call.
-// OU player clica "Encerrar partida" antes pra escapar voluntariamente).
-async function handleAbort(event, matchId) {
-  const decoded = await verifyIdToken(event.headers);
-  if (!decoded) return json(401, { error: 'unauthorized' });
-  const uid = decoded.uid;
-
-  const db = admin.firestore();
-  const ref = db.collection('matches').doc(matchId);
-  const snap = await ref.get();
-  if (!snap.exists) return json(404, { error: 'match_not_found' });
-  const m = snap.data();
-
-  // Só pode abortar se ainda está em fluxo ativo (não acabou)
-  if (m.status === 'finished' || m.status === 'cancelled') {
-    return json(409, { error: 'match_already_ended', status: m.status });
-  }
-
-  // Verifica que user é parte do match
-  const inA = (m.teamA || []).some(p => p.uid === uid);
-  const inB = (m.teamB || []).some(p => p.uid === uid);
-  if (!inA && !inB) return json(403, { error: 'not_in_match' });
-
-  await ref.update({
-    status: 'cancelled',
-    cancelReason: 'aborted_by_player',
-    cancelDetail: `Cancelada por ${decoded.name || uid}`,
-    cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-  await releaseLockedLobbies(matchId);
-
-  console.log(`[match ${matchId}] ABORTED por ${uid}`);
-  return json(200, { success: true, status: 'cancelled' });
-}
-
-exports.setupMatchServer = setupMatchServer;
-exports.aggregatePlayerStats = aggregatePlayerStats;
+          detail: 'A conta logada no Steam Client é diferente
