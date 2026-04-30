@@ -360,37 +360,53 @@ async function setupMatchServer(matchId) {
     await rcon.authenticate(rconPass);
     console.log(`[match ${matchId}] RCON autenticado (usando fake_rcon wrapper)`);
 
-    // 1. Mata partida em andamento (se houver) e força reset limpo
+    // 1. Reset config + permite player conectar mesmo sem match carregado
     await rcon.execute(wrap('matchzy_kick_when_no_match_loaded 0'));
 
-    // 2. v36-nopass: garante servidor SEM senha. Bug do cs2-fake-rcon parser
-    //    fazia `sv_password X` deixar a senha como literal (com aspas) —
-    //    causava "senha rejeitada pelo servidor". Mais simples: server aberto,
-    //    segurança via IP/porta não-públicos. Re-adicionar password depois.
+    // 2. Server SEM senha (workaround cs2-fake-rcon parser bug).
     await rcon.execute(wrap('sv_password ""'));
-    await rcon.execute(wrap('sv_password ;'));  // segundo reset (defensivo)
 
-    // 3. Carrega match via URL — MatchZy puxa nosso JSON de config.
+    // 3. v37-mapfix v2: changelevel pro mapa correto ANTES do loadmatch.
+    //    Player que entrar no servidor já cai no mapa certo, sem warmup
+    //    no startup map. MatchZy depois consome o config no novo mapa.
+    if (finalMap && /^[a-z0-9_]+$/i.test(finalMap)) {
+      try {
+        await rcon.execute(wrap(`changelevel ${finalMap}`));
+        console.log(`[match ${matchId}] changelevel: ${finalMap}`);
+        // Aguarda 3s pro mapa carregar antes de mandar loadmatch
+        await new Promise(r => setTimeout(r, 3000));
+      } catch (e) {
+        console.warn(`[match ${matchId}] changelevel falhou:`, e.message);
+      }
+    }
+
+    // 4. Carrega match via URL — MatchZy puxa nosso JSON de config.
     const loadCmd = wrap(`matchzy_loadmatch_url "${configUrl}"`);
     const loadResp = await rcon.execute(loadCmd);
     console.log(`[match ${matchId}] matchzy_loadmatch_url resposta:`, loadResp);
 
-    // 4. v37-mapfix: força changelevel pro mapa correto. MatchZy DEVERIA
-    //    fazer isso automático ao carregar o match, mas falhou em testes
-    //    (servidor ficava no startup map). Belt-and-suspenders.
-    if (finalMap && /^[a-z0-9_]+$/i.test(finalMap)) {
-      try {
-        await rcon.execute(wrap(`changelevel ${finalMap}`));
-        console.log(`[match ${matchId}] changelevel forçado: ${finalMap}`);
-      } catch (e) {
-        console.warn(`[match ${matchId}] changelevel falhou (MatchZy pode pegar):`, e.message);
-      }
-    }
-
-    // 5. Reset sv_password DEPOIS do loadmatch também (caso MatchZy seta algo)
+    // 5. Reset sv_password DEPOIS do loadmatch (defensivo).
     await rcon.execute(wrap('sv_password ""'));
 
     rcon.disconnect();
+
+    // 6. v37-autoready: dispara ready de ambos os times automaticamente.
+    //    Filosofia: se player conectou no server, ele está ready. Sem `.ready`
+    //    chato no chat. Espera ~30s pra galera ter tempo de entrar, depois
+    //    força ready. MatchZy começa knife round + match imediatamente.
+    //    Roda em background pra NÃO bloquear o flow do setup.
+    setTimeout(async () => {
+      try {
+        const rcon2 = new Rcon({ host: ip, port: rconPort, timeout: 5000 });
+        await rcon2.authenticate(rconPass);
+        await rcon2.execute(wrap('matchzy_ready_team1'));
+        await rcon2.execute(wrap('matchzy_ready_team2'));
+        console.log(`[match ${matchId}] auto-ready disparado pros 2 times`);
+        rcon2.disconnect();
+      } catch (e) {
+        console.warn(`[match ${matchId}] auto-ready falhou:`, e.message);
+      }
+    }, 30000);
   } catch (err) {
     console.error(`[match ${matchId}] RCON falhou:`, err.message);
     try { rcon.disconnect(); } catch {}
@@ -460,13 +476,15 @@ async function handleMatchzyConfig(matchId) {
       matchzy_remote_log_url: `${backendUrl}/api/match/webhook`,
       matchzy_remote_log_header_key: 'X-MatchZy-Secret',
       matchzy_remote_log_header_value: webhookSecret,
-      // ── v37-team-fix: força players nos times certos, sem auto-balance ──
-      mp_autoteambalance: 0,         // impede auto-balance que move players
-      mp_limitteams: 0,              // sem limite de tamanho (evita "team is full")
-      mp_match_can_clinch: 0,        // 1 mapa, sem necessidade
-      // ── Warmup curto pra galera não esperar muito ──
-      mp_warmup_pausetimer: 0,       // warmup roda direto, sem pause
-      mp_warmuptime: 30,             // 30s de warmup (pra todos entrarem)
+      // ── v37-autoready: basta 1 ready de cada time (backend dispara via RCON) ──
+      matchzy_minimum_ready_required: 1,
+      // ── Times forçados pelo MatchZy, sem balance automático ──
+      mp_autoteambalance: 0,
+      mp_limitteams: 0,
+      mp_match_can_clinch: 0,
+      // ── Warmup roda 60s, mas auto-ready dispara em 30s ──
+      mp_warmup_pausetimer: 0,
+      mp_warmuptime: 60,
       // ── Configs padrão competitivo (MR12) ──
       mp_friendlyfire: 1,
       mp_overtime_enable: 1,
@@ -945,50 +963,4 @@ async function handleGuardValidate(event, matchId) {
     return json(503, { error: 'server_not_ready' });
   }
 
-  return json(200, {
-    ok: true,
-    ip, port,
-    steamConnectUrl: `steam://connect/${ip}:${port}`,
-    // v37-connect-fix: fallback launch URL (funciona se CS2 não tá aberto)
-    steamRunGameUrl: `steam://rungameid/730/+connect%20${ip}:${port}`,
-    // Comando manual pro user colar no console do CS2 (fallback garantido)
-    connectCommand: `connect ${ip}:${port}`,
-    summary: {
-      matchId,
-      map: m.mapVeto?.finalMap || 'unknown',
-      team: inA ? 'A' : 'B',
-      teammates: (inA ? m.teamA : m.teamB || []).map(p => p.name).filter(Boolean),
-      opponents: (inA ? m.teamB : m.teamA || []).map(p => p.name).filter(Boolean),
-    },
-  });
-}
-
-// v36-nopass: abort manual
-async function handleAbort(event, matchId) {
-  const decoded = await verifyIdToken(event.headers);
-  if (!decoded) return json(401, { error: 'unauthorized' });
-  const uid = decoded.uid;
-  const db = admin.firestore();
-  const ref = db.collection('matches').doc(matchId);
-  const snap = await ref.get();
-  if (!snap.exists) return json(404, { error: 'match_not_found' });
-  const m = snap.data();
-  if (m.status === 'finished' || m.status === 'cancelled') {
-    return json(409, { error: 'match_already_ended', status: m.status });
-  }
-  const inA = (m.teamA || []).some(p => p.uid === uid);
-  const inB = (m.teamB || []).some(p => p.uid === uid);
-  if (!inA && !inB) return json(403, { error: 'not_in_match' });
-  await ref.update({
-    status: 'cancelled',
-    cancelReason: 'aborted_by_player',
-    cancelDetail: 'Cancelada por ' + (decoded.name || uid),
-    cancelledAt: admin.firestore.FieldValue.serverTimestamp(),
-  });
-  await releaseLockedLobbies(matchId);
-  console.log('[match ' + matchId + '] ABORTED por ' + uid);
-  return json(200, { success: true, status: 'cancelled' });
-}
-
-exports.setupMatchServer = setupMatchServer;
-exports.aggregatePlayerStats = aggregatePlayerStats;
+  retu
