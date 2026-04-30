@@ -129,6 +129,7 @@ const rafflesMod         = safeRequire('./functions/raffles', 'raffles');
 const inspectLinkMod     = safeRequire('./functions/inspect-link', 'inspect-link');
 const lobbyMod           = safeRequire('./functions/lobby', 'lobby');
 const matchMod           = safeRequire('./functions/match', 'match');
+const cryptoWebhookMod   = safeRequire('./functions/crypto-webhook', 'crypto-webhook');
 
 const catalogHandler         = catalogMod?.handler     || disabledRoute('catalog');
 const skinDetailHandler      = skinDetailMod?.handler  || disabledRoute('skin-detail');
@@ -149,6 +150,7 @@ const rafflesHandler         = rafflesMod?.handler     || disabledRoute('raffles
 const inspectLinkHandler     = inspectLinkMod?.handler || disabledRoute('inspect-link');
 const lobbyHandler           = lobbyMod?.handler       || disabledRoute('lobby');
 const matchHandler           = matchMod?.handler       || disabledRoute('match');
+const cryptoWebhookHandler   = cryptoWebhookMod?.handler || disabledRoute('crypto-webhook');
 // Módulos novos: envolvidos em try/catch pra tolerância a deploys parciais.
 // Se qualquer arquivo falhar, só a rota dependente é desabilitada (503 em vez de crash total).
 function safeRequire(path, label) {
@@ -219,6 +221,9 @@ app.options('/api/create-order', (req, res) => res.sendStatus(204));
 // Check PIX: 20 per minute
 app.post('/api/check-pix', rateLimit(60000, 20), wrapHandler(checkPixHandler));
 app.options('/api/check-pix', (req, res) => res.sendStatus(204));
+
+// Crypto webhook (NOWPayments IPN) — sem rate limit, validação por HMAC
+app.post('/api/crypto/webhook', wrapHandler(cryptoWebhookHandler));
 
 // Exchange rate: 30 per minute
 app.get('/api/exchange-rate', rateLimit(60000, 30), wrapHandler(exchangeRateHandler));

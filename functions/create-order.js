@@ -163,6 +163,61 @@ async function createCheckoutProPreference(amount, orderId, items, user, returnB
   };
 }
 
+// ── NOWPayments — Crypto invoice ───────────────────────────────────────
+// Usa o "Invoice" endpoint da NOWPayments: cria fatura hospedada onde o
+// cliente escolhe a moeda (BTC, ETH, USDT, …) e paga. Webhook IPN bate
+// na gente quando confirmado on-chain.
+//
+// Vantagem do invoice vs payment direto: cliente NÃO precisa decidir a
+// moeda na frente; abre a página NOWPayments e escolhe lá. Suporta mais
+// de 100 moedas.
+//
+// Env vars necessárias no Railway:
+//   NOWPAYMENTS_API_KEY       (X-Api-Key, ex: QYQM6TE-4YR4ZV7-NDJQF5V-8T2X2XH)
+//   NOWPAYMENTS_IPN_SECRET    (assinatura HMAC do webhook)
+//   PUBLIC_SITE_URL           (pra success/cancel redirect — já usado pelo MP)
+async function createCryptoInvoice(amount, orderId, items, user, returnBaseUrl) {
+  const NP_KEY = process.env.NOWPAYMENTS_API_KEY;
+  if (!NP_KEY) throw new Error('NOWPAYMENTS_API_KEY not configured');
+
+  const ipnUrl = (process.env.PUBLIC_BACKEND_URL || 'https://gumax-backend-production.up.railway.app')
+    + '/api/crypto/webhook';
+
+  const description = items.length === 1
+    ? `Gumax: ${items[0].name || 'Skin'}`
+    : `Gumax: ${items.length} skins (Pedido ${orderId})`;
+
+  const invoice = {
+    price_amount: rd(amount),
+    price_currency: 'brl',
+    order_id: orderId,
+    order_description: description,
+    ipn_callback_url: ipnUrl,
+    success_url: `${returnBaseUrl}/index.html?order=${orderId}&status=success`,
+    cancel_url:  `${returnBaseUrl}/index.html?order=${orderId}&status=cancelled`,
+  };
+
+  const res = await fetch('https://api.nowpayments.io/v1/invoice', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': NP_KEY,
+    },
+    body: JSON.stringify(invoice),
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    console.error('[CreateOrder] NOWPayments invoice error:', JSON.stringify(data));
+    throw new Error(data.message || data.error || 'Failed to create crypto invoice');
+  }
+  return {
+    invoiceId: data.id,
+    invoiceUrl: data.invoice_url,
+    expiresAt: data.expiration_estimate_date || null,
+  };
+}
+
 exports.handler = async (event) => {
   const H = {
     'Content-Type': 'application/json',
@@ -191,8 +246,8 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'User with steamId and email required' }) };
     }
 
-    if (!['pix', 'card'].includes(paymentMethod)) {
-      return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'paymentMethod must be pix or card' }) };
+    if (!['pix', 'card', 'crypto'].includes(paymentMethod)) {
+      return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'paymentMethod must be pix, card or crypto' }) };
     }
 
     // Calculate total
@@ -231,6 +286,14 @@ exports.handler = async (event) => {
         console.error('[CreateOrder] Card preference error:', e.message);
         return { statusCode: 500, headers: H, body: JSON.stringify({ error: 'Failed to create card checkout: ' + e.message }) };
       }
+    } else if (paymentMethod === 'crypto') {
+      const returnBaseUrl = process.env.PUBLIC_SITE_URL || 'https://market.gumaxskins.com';
+      try {
+        payment = await createCryptoInvoice(total, orderId, items, user, returnBaseUrl);
+      } catch (e) {
+        console.error('[CreateOrder] Crypto invoice error:', e.message);
+        return { statusCode: 500, headers: H, body: JSON.stringify({ error: 'Failed to create crypto invoice: ' + e.message }) };
+      }
     }
 
     // Save order to Firestore
@@ -256,6 +319,9 @@ exports.handler = async (event) => {
         // Card / Checkout Pro fields
         preferenceId: payment.preferenceId || null,
         initPoint: payment.initPoint || null,
+        // Crypto fields (NOWPayments)
+        cryptoInvoiceId: payment.invoiceId || null,
+        cryptoInvoiceUrl: payment.invoiceUrl || null,
         status: 'pending', // pending, paid, processing, shipped, delivered
         createdAt: new Date().toISOString(),
         paidAt: null,
@@ -295,11 +361,17 @@ exports.handler = async (event) => {
         paymentId: payment.paymentId,
         status: payment.status,
       });
-    } else {
+    } else if (paymentMethod === 'card') {
       Object.assign(responseBody, {
         preferenceId: payment.preferenceId,
         initPoint: payment.initPoint,             // URL pra redirecionar
         sandboxInitPoint: payment.sandboxInitPoint,
+      });
+    } else if (paymentMethod === 'crypto') {
+      Object.assign(responseBody, {
+        invoiceId: payment.invoiceId,
+        invoiceUrl: payment.invoiceUrl,            // URL hospedada NOWPayments
+        expiresAt: payment.expiresAt,
       });
     }
 
