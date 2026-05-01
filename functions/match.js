@@ -935,8 +935,91 @@ async function handleRanking() {
 }
 
 // ─── Handler HTTP ───────────────────────────────────────────────────────
+// ── POST /debug/simulate-match — cria match fake e dispara setupMatchServer ──
+// v38-debug: ferramenta pra testar pipeline MatchZy sem precisar de 10 pessoas.
+// Cria match com matchzyId em segundos, status='starting', e chama
+// setupMatchServer direto. Útil pra validar se "Match load failed!" foi
+// resolvido sem desperdiçar 40min jogando.
+//
+// Body: { secret: 'X', mapName: 'de_mirage' (opcional) }
+// Response: { matchId, matchzyId, mapName }
+//
+// Verificar resultado nos Railway logs com filtro pelo matchId retornado.
+async function handleDebugSimulateMatch(event) {
+  // Auth simples: secret no body. NÃO expor publicamente — só pra debug interno.
+  const body = JSON.parse(event.body || '{}');
+  const expectedSecret = process.env.DEBUG_SECRET || process.env.MATCHZY_WEBHOOK_SECRET || '';
+  if (!expectedSecret || body.secret !== expectedSecret) {
+    return json(401, { error: 'invalid_secret', hint: 'pass body.secret matching DEBUG_SECRET or MATCHZY_WEBHOOK_SECRET env var' });
+  }
+
+  const mapName = body.mapName || 'de_mirage';
+  if (!/^de_[a-z0-9_]+$/.test(mapName)) return json(400, { error: 'invalid_mapName' });
+
+  const db = admin.firestore();
+
+  // Cria 10 players fake com SteamIDs válidos (formato Steam ID 64)
+  // SteamID 64 começa com 765611 + 10 dígitos. Pra teste, geramos sequenciais.
+  const baseSteamId = 76561198000000000n;
+  const teamA = Array.from({ length: 5 }, (_, i) => ({
+    uid: 'fake-A-' + i,
+    steamId: String(baseSteamId + BigInt(1000 + i)),
+    name: `BotA${i+1}`,
+    avatar: '',
+  }));
+  const teamB = Array.from({ length: 5 }, (_, i) => ({
+    uid: 'fake-B-' + i,
+    steamId: String(baseSteamId + BigInt(2000 + i)),
+    name: `BotB${i+1}`,
+    avatar: '',
+  }));
+
+  // Cria o doc do match já em status='starting' com matchzyId em segundos
+  const matchRef = db.collection('matches').doc();
+  const createdAtMs = Date.now();
+  const matchzyId = Math.floor(createdAtMs / 1000);
+  await matchRef.set({
+    teamA, teamB,
+    status: 'starting',
+    matchzyId,
+    confirmations: [...teamA, ...teamB].reduce((acc, p) => { acc[p.uid] = true; return acc; }, {}),
+    confirmExpiresAt: admin.firestore.Timestamp.fromMillis(createdAtMs + 30000),
+    mapVeto: {
+      pool: ['de_mirage','de_inferno','de_dust2','de_nuke','de_anubis','de_ancient','de_cache','de_train'],
+      actions: [],
+      activeTeam: null,
+      finalMap: mapName,
+      turn: 7,
+    },
+    serverInfo: null,
+    stats: {},
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    debugSimulated: true,
+  });
+
+  console.log(`[debug-simulate] criado match ${matchRef.id} matchzyId=${matchzyId} mapa=${mapName}`);
+
+  // Dispara setupMatchServer em background (não espera resposta — RCON pode demorar)
+  setupMatchServer(matchRef.id).catch(e => {
+    console.error(`[debug-simulate] setupMatchServer falhou:`, e.message);
+  });
+
+  return json(200, {
+    ok: true,
+    matchId: matchRef.id,
+    matchzyId,
+    mapName,
+    hint: `Veja Railway logs filtrando por '${matchRef.id}' pra acompanhar o setup`,
+  });
+}
+
 exports.handler = async (event) => {
-  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' }
+
+  // v38-debug: rota de simulação (POST /api/debug/simulate-match — sem prefixo /api/match)
+  if (event.httpMethod === 'POST' && (event.path || '').includes('/debug/simulate-match')) {
+    return handleDebugSimulateMatch(event);
+  };
 
   const path = event.path || '';
 
