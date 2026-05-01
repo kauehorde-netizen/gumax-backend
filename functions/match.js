@@ -502,11 +502,21 @@ async function handleMatchzyConfig(matchId) {
   // "Match load failed!" e caía em modo PUG (sem nosso config).
   // Agora geramos numId baseado no timestamp createdAt em ms (sempre único,
   // sempre integer) e salvamos pra webhook reverse-lookup.
+  // v38-mz-id-fix v2: MatchZy valida matchid como int32 (max 2.147 bi).
+  // Antes usávamos timestamp em ms (~1.7 trilhões) → estourava int32 →
+  // validação failed → "Match load failed!". Agora usa SEGUNDOS (~1.78 bi),
+  // cabe folgado em int32 até 2038. Source MatchZy MatchManagement.cs:
+  //   if (!int.TryParse(jsonData[field], out numMaps)) return error;
   let matchzyId = m.matchzyId;
+  // Se o matchzyId existente é > int32 max (deploy antigo), regenera
+  if (matchzyId && matchzyId > 2147483647) {
+    matchzyId = null;
+    console.log(`[matchzy-config] ${matchId} matchzyId antigo (>int32) — regenerando`);
+  }
   if (!matchzyId) {
-    matchzyId = m.createdAt?.toMillis ? m.createdAt.toMillis() : Date.now();
+    matchzyId = Math.floor((m.createdAt?.toMillis ? m.createdAt.toMillis() : Date.now()) / 1000);
     await ref.update({ matchzyId });
-    console.log(`[matchzy-config] ${matchId} → matchzyId=${matchzyId} (gerado)`);
+    console.log(`[matchzy-config] ${matchId} → matchzyId=${matchzyId} (segundos, fits int32)`);
   }
 
   // Schema MatchZy: https://shobhit-pathak.github.io/MatchZy/match_setup/
