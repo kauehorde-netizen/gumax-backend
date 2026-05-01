@@ -488,11 +488,25 @@ async function setupMatchServer(matchId) {
 // possíveis. Aceitável pra MVP.
 async function handleMatchzyConfig(matchId) {
   const db = admin.firestore();
-  const snap = await db.collection('matches').doc(matchId).get();
+  const ref = db.collection('matches').doc(matchId);
+  const snap = await ref.get();
   if (!snap.exists) return json(404, { error: 'match_not_found' });
   const m = snap.data();
   if (m.status !== 'starting' && m.status !== 'in_progress') {
     return json(409, { error: 'match_not_ready', status: m.status });
+  }
+
+  // v38-mz-id-fix: MatchZy v0.8.x EXIGE matchid NUMÉRICO (não string).
+  // Documentação: "matchid: A unique numeric ID for the match"
+  // Antes mandávamos o ID Firestore (string) → MatchZy rejeitava com
+  // "Match load failed!" e caía em modo PUG (sem nosso config).
+  // Agora geramos numId baseado no timestamp createdAt em ms (sempre único,
+  // sempre integer) e salvamos pra webhook reverse-lookup.
+  let matchzyId = m.matchzyId;
+  if (!matchzyId) {
+    matchzyId = m.createdAt?.toMillis ? m.createdAt.toMillis() : Date.now();
+    await ref.update({ matchzyId });
+    console.log(`[matchzy-config] ${matchId} → matchzyId=${matchzyId} (gerado)`);
   }
 
   // Schema MatchZy: https://shobhit-pathak.github.io/MatchZy/match_setup/
@@ -505,7 +519,7 @@ async function handleMatchzyConfig(matchId) {
   const backendUrl = (process.env.BACKEND_PUBLIC_URL || '').replace(/\/$/, '');
 
   return json(200, {
-    matchid: matchId,
+    matchid: matchzyId,
     team1: { name: 'Time A', tag: 'A', players: team1Players },
     team2: { name: 'Time B', tag: 'B', players: team2Players },
     num_maps: 1,
@@ -556,13 +570,31 @@ async function handleWebhook(event) {
     return json(401, { error: 'invalid_secret' });
   }
   const body = JSON.parse(event.body || '{}');
-  const matchId = body.match_id || body.matchId;
-  if (!matchId) return json(400, { error: 'missing_match_id' });
+  // MatchZy manda matchid INTEGER (createdAt ms gerado em handleMatchzyConfig).
+  // Reverse-lookup: matches WHERE matchzyId == X → encontra o doc com ID Firestore.
+  const matchzyMatchId = body.match_id || body.matchId || body.matchid;
+  if (!matchzyMatchId) return json(400, { error: 'missing_match_id' });
+  console.log(`[webhook] recebido pra matchzyId=${matchzyMatchId}, evento=${body.event || body.type || '?'}`);
 
   const db = admin.firestore();
-  const ref = db.collection('matches').doc(matchId);
-  const snap = await ref.get();
-  if (!snap.exists) return json(404, { error: 'match_not_found' });
+  // v38-mz-id-fix: matchzyMatchId é integer; faz query reversa no campo matchzyId
+  let snap, ref;
+  const lookupSnap = await db.collection('matches')
+    .where('matchzyId', '==', Number(matchzyMatchId))
+    .limit(1).get();
+  if (lookupSnap.empty) {
+    // Fallback: tenta como ID Firestore direto (pra não quebrar matches antigos)
+    ref = db.collection('matches').doc(String(matchzyMatchId));
+    snap = await ref.get();
+  } else {
+    snap = lookupSnap.docs[0];
+    ref = snap.ref;
+  }
+  if (!snap.exists) {
+    console.warn(`[webhook] match não encontrado: matchzyId=${matchzyMatchId}`);
+    return json(404, { error: 'match_not_found' });
+  }
+  console.log(`[webhook] resolvido pra Firestore matchId=${ref.id}`);
 
   // Atualiza o match com placar e stats. MatchZy manda webhook de eventos
   // diferentes (round_end, series_end, demo_uploaded). Trata o mais importante:
