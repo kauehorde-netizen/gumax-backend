@@ -157,12 +157,21 @@ async function cleanupStaleLobbies() {
     if (ageRefMs < cutoff) expired.push({ ref: d.ref, id: d.id, ageMin });
   });
 
-  // Aplica orphan release: zera matchId e seta status correto. Se também > 20min, deleta.
+  // Aplica orphan release: zera matchId e seta status correto.
+  // v38-persist: cooldown de 15min depois de matchEndedAt (em vez de
+  // comparar com createdAt direto). Antes, lobby >20min era deletado mesmo
+  // se a partida tinha acabado 1min atrás — agora preserva pro user voltar.
+  const POST_MATCH_COOLDOWN_MS = 15 * 60 * 1000;
   if (orphans.length) {
     const batch = db.batch();
     for (const o of orphans) {
-      // Se já passou dos 20 min, deleta direto (já tava abandonado)
-      if (o.ageMin >= 20) {
+      // Calcula tempo desde fim do match (se setado), senão usa ageMin
+      const matchEndedMs = o.data.matchEndedAt?.toMillis ? o.data.matchEndedAt.toMillis() : null;
+      const sincePostMatchMs = matchEndedMs ? (Date.now() - matchEndedMs) : null;
+      const shouldDelete = sincePostMatchMs !== null
+        ? sincePostMatchMs > POST_MATCH_COOLDOWN_MS  // pós-match: só deleta após 15min
+        : o.ageMin >= 20;                            // sem matchEndedAt: TTL absoluto
+      if (shouldDelete) {
         batch.delete(o.ref);
         expired.push({ ref: o.ref, id: o.id, ageMin: o.ageMin });
       } else {
