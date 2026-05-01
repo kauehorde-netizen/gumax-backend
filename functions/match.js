@@ -917,6 +917,17 @@ async function handlePlayerProfile(steamId) {
     // Rolling
     kdrRecent10: data.kdrRecent10 || 0,
     winStreak: data.winStreak || 0,
+    // v38-rating: campos novos do CS Rating Premier-style
+    csRating: data.csRating ?? null,
+    calibrating: data.calibrating ?? (matches < 3),
+    calibrationProgress: data.calibrationProgress ?? Math.min(3, matches),
+    tier: data.tier || (data.csRating != null ? 'gray' : 'calibrating'),
+    tierName: data.tierName || 'Bronze',
+    tierColor: data.tierColor || '#9ca3af',
+    lastDelta: data.lastDelta || 0,
+    lastSeasonTier: data.lastSeasonTier || null,
+    lastSeasonTierName: data.lastSeasonTierName || null,
+    lastSeasonRating: data.lastSeasonRating || null,
     // Histórico — últimas 20 partidas (mais recentes primeiro)
     history: (Array.isArray(data.recent10) ? [...data.recent10] : []).reverse().map(m => ({
       matchId: m.matchId,
@@ -962,10 +973,21 @@ async function handlePlayersBatch(event) {
         kdrRecent10: d.kdrRecent10 || 0,
         winStreak: d.winStreak || 0,
         matches: d.matches || 0,
+        // v38-rating: campos rating no batch (pra lobbies mostrarem tier do owner)
+        csRating: d.csRating ?? null,
+        calibrating: d.calibrating ?? ((d.matches || 0) < 3),
+        calibrationProgress: d.calibrationProgress ?? Math.min(3, d.matches || 0),
+        tier: d.tier || (d.csRating != null ? 'gray' : 'calibrating'),
+        tierName: d.tierName || 'Calibrando',
+        tierColor: d.tierColor || '#6b7280',
       };
     } else {
       // Player nunca jogou — sem stats
-      result[id] = { steamId: id, level: null, kdrRecent10: 0, winStreak: 0, matches: 0 };
+      result[id] = {
+        steamId: id, level: null, kdrRecent10: 0, winStreak: 0, matches: 0,
+        csRating: null, calibrating: true, calibrationProgress: 0,
+        tier: 'calibrating', tierName: 'Calibrando', tierColor: '#6b7280',
+      };
     }
   });
   return json(200, { players: result });
