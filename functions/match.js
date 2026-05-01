@@ -34,6 +34,8 @@
 //   createdAt, finishedAt
 
 const admin = require('firebase-admin');
+// v38-rating: sistema CS Rating Premier-style (calibração 3 partidas + Elo modificado)
+const rating = require('./rating');
 
 // Helper local pra verificar Firebase ID token (mesmo padrão de credits/raffles).
 async function verifyIdToken(headers) {
@@ -650,12 +652,13 @@ async function handleWebhook(event) {
 
     // Lê o doc atualizado (com winner/scoreA/scoreB) pra passar ao aggregate
     const updatedSnap = await ref.get();
-    await aggregatePlayerStats(matchId, stats, updatedSnap.data());
+    await aggregatePlayerStats(ref.id, stats, updatedSnap.data());
 
-    // Libera os lobbies pra próxima partida
-    const matchData = (await ref.get()).data();
-    if (matchData.lobbyA) await db.collection('lobbies').doc(matchData.lobbyA).delete().catch(() => {});
-    if (matchData.lobbyB) await db.collection('lobbies').doc(matchData.lobbyB).delete().catch(() => {});
+    // v38-persist: libera lobbies (NÃO deleta!) com matchEndedAt setado
+    // pra cleanupStaleLobbies dar 15min de cooldown antes de remover.
+    // Permite players voltarem pro lobby pós-partida sem ele sumir.
+    await releaseLockedLobbies(ref.id);
+    console.log(`[webhook] match ${ref.id} finalizado, lobbies liberados (cooldown 15min)`);
   }
 
   return json(200, { received: true });
@@ -694,6 +697,22 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
   const winner = matchData?.winner || null;            // 'A' | 'B' | 'tie' | null
   const teamABySteamId = new Set((matchData?.teamA || []).map(p => p.steamId));
   const teamBBySteamId = new Set((matchData?.teamB || []).map(p => p.steamId));
+
+  // v38-rating: pre-fetch dos ratings ANTES do match pra calcular skillDiff
+  // (precisa do rating do oponente ANTES do delta dessa partida ser aplicado).
+  // 1 read batch em vez de N reads dentro do loop.
+  const allSteamIds = [...teamABySteamId, ...teamBBySteamId];
+  const preMatchRatings = {};
+  for (const sid of allSteamIds) {
+    try {
+      const psSnap = await db.collection('playerStats').doc(sid).get();
+      preMatchRatings[sid] = psSnap.exists ? (psSnap.data().csRating ?? null) : null;
+    } catch { preMatchRatings[sid] = null; }
+  }
+  const teamARatings = (matchData?.teamA || []).map(p => preMatchRatings[p.steamId]).filter(r => r != null);
+  const teamBRatings = (matchData?.teamB || []).map(p => preMatchRatings[p.steamId]).filter(r => r != null);
+  const teamAAvg = teamARatings.length ? (teamARatings.reduce((a,b)=>a+b,0) / teamARatings.length) : 5000;
+  const teamBAvg = teamBRatings.length ? (teamBRatings.reduce((a,b)=>a+b,0) / teamBRatings.length) : 5000;
 
   for (const [steamId, s] of Object.entries(stats)) {
     const ref = db.collection('playerStats').doc(steamId);
@@ -767,6 +786,47 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
       // Level calculado a partir do KDR rolling
       const level = computeLevel(kdrRecent10, newMatches);
 
+      // ── v38-rating: CS Rating Premier-style ──
+      // Primeiras 3 partidas = calibração (csRating fica null, acumula em
+      // calibrationMatches[]). Após 3ª, calcula rating inicial.
+      // Da 4ª em diante, aplica delta baseado em Elo modificado.
+      let newCsRating = prev.csRating ?? null;
+      let newCalibrationMatches = Array.isArray(prev.calibrationMatches) ? [...prev.calibrationMatches] : [];
+      let lastDelta = 0;
+
+      const calibEntry = {
+        result, kills: s.kills || 0, deaths: s.deaths || 0, assists: s.assists || 0,
+      };
+
+      if (newMatches <= 3) {
+        newCalibrationMatches.push(calibEntry);
+        if (newMatches === 3) {
+          newCsRating = rating.calibrationRating(newCalibrationMatches);
+          console.log(`[rating] ${steamId} calibrou após 3 jogos: ${newCsRating} pts`);
+        }
+      } else {
+        // Pós-calibração: aplica delta. Se csRating for null aqui (ex: doc antigo
+        // sem calibração), começa em 5000 (Prata baixo).
+        const ownAvg = inA ? teamAAvg : teamBAvg;
+        const oppAvg = inA ? teamBAvg : teamAAvg;
+        lastDelta = rating.calculateMatchDelta({
+          won: result === 'win',
+          ownTeamAvg: ownAvg,
+          opponentTeamAvg: oppAvg,
+          roundsScored: myScore,
+          roundsConceded: oppScore,
+          kills: s.kills || 0,
+          deaths: s.deaths || 0,
+          assists: s.assists || 0,
+          mvps: s.mvps || 0,
+        });
+        const baseRating = (prev.csRating ?? 5000);
+        newCsRating = Math.max(0, baseRating + lastDelta);
+        console.log(`[rating] ${steamId} ${lastDelta >= 0 ? '+' : ''}${lastDelta} pts → ${newCsRating}`);
+      }
+
+      const tierInfo = rating.getTierForRating(newCsRating);
+
       tx.set(ref, {
         steamId,
         // All-time
@@ -779,6 +839,16 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
         kdr:    newKills / Math.max(1, newDeaths),
         kda:   (newKills + newAssists) / Math.max(1, newDeaths),
         avgAdr: newAdrSum / Math.max(1, newMatches),
+
+        // v38-rating: campos novos
+        csRating: newCsRating,
+        calibrationMatches: newCalibrationMatches,
+        calibrating: newMatches < 3,
+        calibrationProgress: Math.min(3, newMatches),
+        tier: tierInfo.key,
+        tierName: tierInfo.name,
+        tierColor: tierInfo.color,
+        lastDelta,    // pra mostrar no pós-match
         // Rolling 20 — esses são os "atuais" (últimas 10 viram level)
         recent10,
         kdrRecent10: Math.round(kdrRecent10 * 100) / 100,
@@ -1026,6 +1096,82 @@ async function handleDebugSimulateMatch(event) {
   });
 }
 
+// ── GET /rating/leaderboard — top jogadores por csRating ──
+async function handleLeaderboard(event) {
+  const db = admin.firestore();
+  const limit = Math.min(50, parseInt(event.queryStringParameters?.limit || '30', 10));
+  // Pega ordenado por csRating DESC, exclui calibrating
+  const snap = await db.collection('playerStats')
+    .where('calibrating', '==', false)
+    .orderBy('csRating', 'desc')
+    .limit(limit).get();
+  const players = snap.docs.map(d => {
+    const x = d.data();
+    return {
+      steamId: d.id,
+      csRating: x.csRating ?? 0,
+      tier: x.tier || 'gray',
+      tierName: x.tierName || 'Bronze',
+      tierColor: x.tierColor || '#9ca3af',
+      matches: x.matches || 0,
+      wins: x.wins || 0,
+      losses: x.losses || 0,
+      kdr: x.kdr || 0,
+      kda: x.kda || 0,
+      avgAdr: x.avgAdr || 0,
+      // Steam profile pra exibição (busca user doc se quiser nome/avatar)
+    };
+  });
+  // Enriquece com nome e avatar via lookup batch users
+  for (const p of players) {
+    try {
+      const u = await db.collection('users').doc(p.steamId).get();
+      if (u.exists) {
+        const d = u.data();
+        p.name = d.steamName || d.fullName || 'Player';
+        p.avatar = d.steamAvatar || d.photoURL || '';
+      }
+    } catch {}
+  }
+  return json(200, { count: players.length, players });
+}
+
+// ── POST /admin/season-reset — zera csRating de todos (cron mensal dia 01) ──
+async function handleSeasonReset(event) {
+  const body = JSON.parse(event.body || '{}');
+  const expectedSecret = process.env.DEBUG_SECRET || process.env.MATCHZY_WEBHOOK_SECRET || '';
+  if (!expectedSecret || body.secret !== expectedSecret) {
+    return json(401, { error: 'invalid_secret' });
+  }
+  const db = admin.firestore();
+  const snap = await db.collection('playerStats').get();
+  const seasonLabel = new Date().toISOString().slice(0,7); // "2026-05"
+  let count = 0;
+  const batch = db.batch();
+  snap.docs.forEach(doc => {
+    const d = doc.data();
+    batch.update(doc.ref, {
+      csRating: null,
+      calibrating: true,
+      calibrationProgress: 0,
+      calibrationMatches: [],
+      tier: 'calibrating',
+      tierName: 'Calibrando',
+      tierColor: '#6b7280',
+      lastSeasonTier: d.tier || 'gray',
+      lastSeasonTierName: d.tierName || 'Bronze',
+      lastSeasonRating: d.csRating ?? 0,
+      seasonStartedAt: admin.firestore.FieldValue.serverTimestamp(),
+      seasonLabel,
+    });
+    count++;
+    if (count % 400 === 0) { batch.commit(); /* nova batch */ }
+  });
+  await batch.commit();
+  console.log(`[season-reset] ${count} jogadores resetados pra temporada ${seasonLabel}`);
+  return json(200, { ok: true, reset: count, seasonLabel });
+}
+
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' }
 
@@ -1038,6 +1184,9 @@ exports.handler = async (event) => {
 
   // /api/match/webhook (POST, sem auth — autenticado por header secret)
   if (event.httpMethod === 'POST' && path.endsWith('/webhook')) return handleWebhook(event);
+  // v38-rating: rating endpoints
+  if (event.httpMethod === 'GET' && path.endsWith('/rating/leaderboard')) return handleLeaderboard(event);
+  if (event.httpMethod === 'POST' && path.endsWith('/admin/season-reset')) return handleSeasonReset(event);
   // /api/match/ranking (GET, público)
   if (event.httpMethod === 'GET' && path.endsWith('/ranking')) return handleRanking();
   // /api/match/players?ids=... (GET, público — batch stats pra mostrar level/KDR em lobby)
