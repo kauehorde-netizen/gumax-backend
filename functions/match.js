@@ -1122,12 +1122,17 @@ async function handleDebugSimulateMatch(event) {
 async function handleLeaderboard(event) {
   const db = admin.firestore();
   const limit = Math.min(50, parseInt(event.queryStringParameters?.limit || '30', 10));
-  // Pega ordenado por csRating DESC, exclui calibrating
+  // v38-rating: filtragem em memória pra evitar composite index do Firestore.
+  // Pega TODOS playerStats com csRating, filtra calibrating=false e ordena.
+  // Pra MVP (~30 players) isso é trivial; pra escala 1000+ adicionar index.
   const snap = await db.collection('playerStats')
-    .where('calibrating', '==', false)
     .orderBy('csRating', 'desc')
-    .limit(limit).get();
-  const players = snap.docs.map(d => {
+    .limit(limit * 3).get();  // pega 3x pra garantir após filtrar calibrando
+  const allDocs = snap.docs.filter(d => {
+    const x = d.data();
+    return x.csRating != null && x.calibrating !== true;
+  }).slice(0, limit);
+  const players = allDocs.map(d => {
     const x = d.data();
     return {
       steamId: d.id,
