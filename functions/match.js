@@ -275,9 +275,13 @@ async function releaseLockedLobbies(matchId) {
         challengedBy: null,
         challengeTo: null,
         challengeExpiresAt: null,
+        // v38-persist: marca quando match acabou pra cleanup dar cooldown extra
+        // de 15min antes de deletar (em vez de comer o lobby porque tem >20min
+        // de createdAt). Permite players voltarem pro lobby pós-partida.
+        matchEndedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
-      console.log(`[match ${matchId}] lobby ${id} liberado: status=${newStatus}`);
+      console.log(`[match ${matchId}] lobby ${id} liberado: status=${newStatus} matchEndedAt=now`);
     }
   } catch (e) {
     console.error(`[match ${matchId}] releaseLockedLobbies falhou:`, e.message);
@@ -566,6 +570,15 @@ async function handleMatchzyConfig(matchId) {
       mp_maxrounds: 24,              // MR12 estilo Premier
       mp_round_restart_delay: 5,
       sv_pausable: 1,
+      // ── v38-team-lock: garante que players caem no time CERTO ──
+      // MatchZy já força via SwitchPlayerTeam quando isMatchSetup=true,
+      // mas se algo der errado, esses cvars reforçam:
+      bot_quota: 0,                  // zero bots — sem confusão de slot
+      mp_team_join: 0,               // bloqueia "join team" via menu (CT/T/spec)
+      mp_join_grace_time: 0,         // não dá grace pra entrar no time errado
+      // ── Pausa warmup até todos estarem no time certo ──
+      // (auto-ready do nosso backend dispara depois que MatchZy força os times)
+      mp_warmup_offline_enabled: 1,
     },
   });
 }
