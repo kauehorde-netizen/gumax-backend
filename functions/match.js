@@ -531,8 +531,18 @@ async function handleMatchzyConfig(matchId) {
   const team2Players = {};
   (m.teamB || []).forEach(p => { if (p.steamId) team2Players[p.steamId] = p.name || 'Player'; });
 
+  // v40-flex-team-size: players_per_team e min_players_to_ready agora derivam
+  // do tamanho real dos times (suporta 3v3, 4v4, 5v5). Antes era hard-code 5
+  // → MatchZy travava em "Waiting for X players" se faltasse alguém.
+  // Lógica: pega o MAIOR dos dois times (caso assimétrico) e bate teto em 5.
+  const sizeA = Object.keys(team1Players).length;
+  const sizeB = Object.keys(team2Players).length;
+  const teamSize = Math.min(5, Math.max(1, sizeA, sizeB)) || 5;
+
   const webhookSecret = process.env.MATCHZY_WEBHOOK_SECRET || 'change-me';
   const backendUrl = (process.env.BACKEND_PUBLIC_URL || '').replace(/\/$/, '');
+
+  console.log(`[matchzy-config] ${matchId} → team1=${sizeA} team2=${sizeB} → players_per_team=${teamSize}`);
 
   return json(200, {
     matchid: matchzyId,
@@ -546,9 +556,9 @@ async function handleMatchzyConfig(matchId) {
     map_sides: ['team1_ct'],
     spectators: { players: {} },
     clinch_series: false,            // 1 mapa só — não precisa de clinch
-    wingman: false,                  // 5v5 padrão
-    players_per_team: 5,
-    min_players_to_ready: 5,
+    wingman: false,                  // wingman é 2v2 num mapa só, mantemos false
+    players_per_team: teamSize,      // dinâmico: 3, 4 ou 5
+    min_players_to_ready: teamSize,  // só ready quando todos chegarem
     skip_veto: true,                 // veto já foi feito no nosso site
     cvars: {
       sv_password: '',               // server aberto (IP só pelo GUARD)
