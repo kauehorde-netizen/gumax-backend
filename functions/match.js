@@ -645,6 +645,7 @@ async function handleWebhook(event) {
         assists: p.assists || 0,
         adr: p.adr || 0,
         hsRate: p.headshot_kills && p.kills ? Math.round((p.headshot_kills/p.kills)*100) : 0,
+        headshotKills: p.headshot_kills || 0,  // v41-stats-adv: pra somar HS% all-time
         mvps: p.mvp || p.mvps || 0,
         rating: p.rating || 0,
       };
@@ -764,6 +765,7 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
         adr: s.adr || 0,
         rating: s.rating || 0,
         hsRate: s.hsRate || 0,
+        headshotKills: s.headshotKills || 0,  // v41-stats-adv
         mvps: s.mvps || 0,
         result,
         // Campos novos pra página de perfil (denormalizados aqui pra evitar N+1)
@@ -941,6 +943,66 @@ async function handlePlayerProfile(steamId) {
     lastSeasonTier: data.lastSeasonTier || null,
     lastSeasonTierName: data.lastSeasonTierName || null,
     lastSeasonRating: data.lastSeasonRating || null,
+    // v41-stats-adv: agregações derivadas do recent10
+    advancedStats: (() => {
+      const recent = Array.isArray(data.recent10) ? data.recent10 : [];
+      if (!recent.length) return null;
+      // HS% ponderado: total HSkills / total kills
+      let totalKills = 0, totalHs = 0, totalAdr = 0, totalDeaths = 0;
+      for (const m of recent) {
+        totalKills  += (m.kills || 0);
+        totalHs     += (m.headshotKills || 0);
+        totalDeaths += (m.deaths || 0);
+        totalAdr    += (m.adr || 0);
+      }
+      const hsPct = totalKills > 0 ? Math.round((totalHs / totalKills) * 100) : 0;
+      const avgAdrRecent = recent.length > 0 ? Math.round(totalAdr / recent.length) : 0;
+
+      // mapStats: agrupa por mapa
+      const byMap = {};
+      for (const m of recent) {
+        if (!m.map) continue;
+        if (!byMap[m.map]) byMap[m.map] = { map: m.map, played: 0, wins: 0, losses: 0, ties: 0, kills: 0, deaths: 0 };
+        const ms = byMap[m.map];
+        ms.played++;
+        if (m.result === 'win') ms.wins++;
+        else if (m.result === 'loss') ms.losses++;
+        else if (m.result === 'tie') ms.ties++;
+        ms.kills  += (m.kills || 0);
+        ms.deaths += (m.deaths || 0);
+      }
+      const mapStats = Object.values(byMap).map(ms => ({
+        ...ms,
+        winRate: ms.played > 0 ? Math.round((ms.wins / ms.played) * 100) : 0,
+        kdr: ms.deaths > 0 ? Math.round((ms.kills / ms.deaths) * 100) / 100 : (ms.kills || 0),
+      })).sort((a,b) => b.played - a.played);
+      // Melhor mapa: maior winRate entre os com >= 2 partidas
+      const eligibleMaps = mapStats.filter(m => m.played >= 2);
+      const bestMap = eligibleMaps.length
+        ? [...eligibleMaps].sort((a,b) => b.winRate - a.winRate || b.played - a.played)[0]
+        : (mapStats[0] || null);
+
+      // weekdayStats: dia da semana (0=Dom, 1=Seg, ..., 6=Sab)
+      const WEEKDAYS_PT = ['Dom','Seg','Ter','Qua','Qui','Sex','Sáb'];
+      const byWday = WEEKDAYS_PT.map((label, i) => ({ wday: i, label, played: 0, wins: 0 }));
+      for (const m of recent) {
+        const t = m.playedAt?._seconds ? m.playedAt._seconds * 1000 : null;
+        if (!t) continue;
+        const d = new Date(t).getDay();
+        byWday[d].played++;
+        if (m.result === 'win') byWday[d].wins++;
+      }
+      const weekdayStats = byWday.map(w => ({
+        ...w,
+        winRate: w.played > 0 ? Math.round((w.wins / w.played) * 100) : 0,
+      }));
+      const playedDays = weekdayStats.filter(w => w.played > 0);
+      const bestWeekday = playedDays.length
+        ? [...playedDays].sort((a,b) => b.winRate - a.winRate || b.played - a.played)[0]
+        : null;
+
+      return { hsPct, avgAdrRecent, mapStats, bestMap, weekdayStats, bestWeekday, sampleSize: recent.length };
+    })(),
     // Histórico — últimas 20 partidas (mais recentes primeiro)
     history: (Array.isArray(data.recent10) ? [...data.recent10] : []).reverse().map(m => ({
       matchId: m.matchId,
