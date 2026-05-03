@@ -129,6 +129,69 @@ async function cleanupStaleLobbies() {
     } catch { matchStatuses[mid] = 'error'; }
   }
 
+  // v48-challenge-expire: limpa challenges que estouraram o TTL (30s).
+  // Antes: se ninguem aceitava, o desafiante ficava em "Aguardando resposta"
+  // eternamente. Agora ambos os lados sao zerados num batch.
+  // Usa o snap JA carregado — zero read extra.
+  const now = Date.now();
+  const lobbiesById = {};
+  snap.docs.forEach(d => { lobbiesById[d.id] = d; });
+  const expiredChallenges = [];
+  const handledIds = new Set();
+  snap.docs.forEach(d => {
+    if (handledIds.has(d.id)) return;
+    const data = d.data();
+    const expMs = data.challengeExpiresAt?.toMillis ? data.challengeExpiresAt.toMillis() : null;
+    if (data.challengedBy && expMs && expMs < now) {
+      // d = sala TARGET (challenged). challengedBy = ID da sala CHALLENGER.
+      expiredChallenges.push({ targetRef: d.ref, targetId: d.id, challengerId: data.challengedBy });
+      handledIds.add(d.id);
+      handledIds.add(data.challengedBy);
+    }
+  });
+  // Cobre tambem o caso onde so o challenger tem challengeTo mas o target
+  // nao tem challengedBy (estado meio-bugado de versao anterior).
+  snap.docs.forEach(d => {
+    if (handledIds.has(d.id)) return;
+    const data = d.data();
+    if (!data.challengeTo) return;
+    const targetDoc = lobbiesById[data.challengeTo];
+    // Se o target nao existe mais OU nao tem challengedBy apontando pra mim
+    // OU o expiresAt do target ja passou
+    const targetData = targetDoc ? targetDoc.data() : null;
+    const targetExp = targetData?.challengeExpiresAt?.toMillis ? targetData.challengeExpiresAt.toMillis() : null;
+    const targetPointsBack = targetData?.challengedBy === d.id;
+    if (!targetData || !targetPointsBack || (targetExp && targetExp < now)) {
+      expiredChallenges.push({ targetRef: targetDoc?.ref || null, targetId: data.challengeTo, challengerId: d.id });
+      handledIds.add(d.id);
+      if (targetDoc) handledIds.add(targetDoc.id);
+    }
+  });
+
+  if (expiredChallenges.length) {
+    const cleanupBatch = db.batch();
+    for (const ec of expiredChallenges) {
+      // Limpa o CHALLENGER: zera challengeTo, status volta pra full
+      const challengerRef = db.collection('lobbies').doc(ec.challengerId);
+      cleanupBatch.update(challengerRef, {
+        challengeTo: null,
+        status: 'full',  // assume que ainda esta cheia (era cheia pra desafiar)
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      // Limpa o TARGET: zera challengedBy + challengeExpiresAt, status volta pra full
+      if (ec.targetRef) {
+        cleanupBatch.update(ec.targetRef, {
+          challengedBy: null,
+          challengeExpiresAt: null,
+          status: 'full',
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+      console.log(`[lobby:cleanup] challenge expirado: challenger=${ec.challengerId} target=${ec.targetId}`);
+    }
+    await cleanupBatch.commit().catch(e => console.warn('[lobby:cleanup] challenge-expire batch failed:', e.message));
+  }
+
   snap.docs.forEach(d => {
     const data = d.data();
     const ageRefMs = data.createdAt?.toMillis ? data.createdAt.toMillis()
