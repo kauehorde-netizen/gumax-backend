@@ -528,6 +528,36 @@ async function handleDeclineChallenge(event, lobbyId) {
   return json(200, { ok: true });
 }
 
+// ───── POST /:id/cancel-challenge ────────────────────────────────────────
+// Chamado pelo CHALLENGER (lado que mandou o desafio) quando o timer expira
+// sem o desafiado responder. Limpa estado dos 2 lados pra liberar nova ação.
+async function handleCancelChallenge(event, lobbyId) {
+  const user = await getAuth(event);
+  if (!user) return json(401, { error: 'login_required' });
+  const db = admin.firestore();
+  const myRef = db.collection('lobbies').doc(lobbyId);
+  await db.runTransaction(async (tx) => {
+    const mine = await tx.get(myRef);
+    if (!mine.exists) throw new Error('not_found');
+    const me = mine.data();
+    if (me.ownerId !== user.uid) throw new Error('not_owner');
+    if (!me.challengeTo) return;  // nada pra cancelar
+    const otherRef = db.collection('lobbies').doc(me.challengeTo);
+    const other = await tx.get(otherRef);
+    if (other.exists && other.data().challengedBy === lobbyId) {
+      tx.update(otherRef, {
+        status: 'full', challengedBy: null, challengeExpiresAt: null,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+    tx.update(myRef, {
+      status: 'full', challengeTo: null, challengeExpiresAt: null,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+  });
+  return json(200, { ok: true });
+}
+
 // ─── Handler HTTP ────────────────────────────────────────────────────────
 exports.handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: CORS, body: '' };
@@ -556,6 +586,7 @@ exports.handler = async (event) => {
     case 'challenge':         return handleChallenge(event, lobbyId);
     case 'accept-challenge':  return handleAcceptChallenge(event, lobbyId);
     case 'decline-challenge': return handleDeclineChallenge(event, lobbyId);
+    case 'cancel-challenge':  return handleCancelChallenge(event, lobbyId);
     default: return json(404, { error: 'unknown_action', action });
   }
 };
