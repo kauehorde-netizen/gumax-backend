@@ -1,5 +1,41 @@
-// ═══ Gumax — Check PIX Payment Status ═══
-// Checks payment status via Mercado Pago API and updates order status
+// ═══ Gumax — Check PIX/Card Payment Status ═══
+// Checks payment status via Mercado Pago API and updates order status.
+// Funciona pra PIX (via pixPaymentId direto) E pra Cartão Checkout Pro
+// (consulta merchant_orders pela preferenceId — Checkout Pro não tem
+// paymentId direto, fica embutido em merchant_orders).
+
+// Helper: consulta Checkout Pro Card pela preferenceId.
+// Retorna { status, payment } onde status pode ser 'approved', 'pending', etc.
+async function checkCheckoutProByPreference(preferenceId, MP_TOKEN) {
+  // GET /merchant_orders/search?preference_id=XXX
+  const r = await fetch(`https://api.mercadopago.com/merchant_orders/search?preference_id=${encodeURIComponent(preferenceId)}`, {
+    headers: { 'Authorization': `Bearer ${MP_TOKEN}` }
+  });
+  if (!r.ok) {
+    const txt = await r.text().catch(() => '');
+    throw new Error(`MP merchant_orders failed (${r.status}): ${txt.slice(0, 200)}`);
+  }
+  const data = await r.json();
+  const orders = data.elements || [];
+  // Procura o merchant_order com status diferente de 'opened' (já tem pagamento)
+  // ou pega o primeiro com payments[] não vazio.
+  let approvedPayment = null;
+  let lastPayment = null;
+  for (const mo of orders) {
+    for (const p of (mo.payments || [])) {
+      lastPayment = p;
+      if (p.status === 'approved') { approvedPayment = p; break; }
+    }
+    if (approvedPayment) break;
+  }
+  if (approvedPayment) {
+    return { status: 'approved', payment: approvedPayment, source: 'checkout_pro' };
+  }
+  if (lastPayment) {
+    return { status: lastPayment.status, payment: lastPayment, source: 'checkout_pro' };
+  }
+  return { status: 'pending', payment: null, source: 'checkout_pro' };
+}
 
 exports.handler = async (event) => {
   const H = {
@@ -61,19 +97,34 @@ exports.handler = async (event) => {
 
         orderData = orderDoc.data();
 
-        // If we don't have paymentId from params, use the one from order
+        // PIX path — paymentId direto na order
         if (!paymentId && orderData.pixPaymentId) {
           const response = await fetch(`https://api.mercadopago.com/v1/payments/${orderData.pixPaymentId}`, {
             headers: { 'Authorization': `Bearer ${MP_TOKEN}` }
           });
-
           const data = await response.json();
-
           if (!response.ok) {
             return { statusCode: response.status, headers: H, body: JSON.stringify({ error: data.message || 'Error fetching payment' }) };
           }
-
           payment = data;
+        }
+
+        // Checkout Pro Card path — não tem paymentId direto, consulta merchant_orders
+        // pela preferenceId. Esse caminho é a CHAVE pra admin saber se cliente
+        // pagou no cartão (porque o webhook pode não ter chegado).
+        if (!payment && !paymentId && orderData.preferenceId) {
+          try {
+            const result = await checkCheckoutProByPreference(orderData.preferenceId, MP_TOKEN);
+            if (result.payment) {
+              payment = result.payment;
+            } else {
+              // Sem pagamento ainda — retorna status 'pending' explícito
+              payment = { id: null, status: result.status, _source: 'checkout_pro_no_payment' };
+            }
+          } catch (e) {
+            console.error('[CheckPayment] Checkout Pro lookup error:', e.message);
+            return { statusCode: 502, headers: H, body: JSON.stringify({ error: 'MP Checkout Pro error: ' + e.message }) };
+          }
         }
       } catch (e) {
         console.error('[CheckPix] Firestore error:', e.message);
@@ -85,20 +136,25 @@ exports.handler = async (event) => {
       return { statusCode: 400, headers: H, body: JSON.stringify({ error: 'Payment not found' }) };
     }
 
-    // Update order status if payment is approved
+    // Update order status if payment is approved (works for both PIX and Card Checkout Pro)
     if (orderId && orderData && payment.status === 'approved') {
       try {
         const admin = require('firebase-admin');
         const db = admin.firestore();
 
         if (orderData.status === 'pending' || orderData.status === 'processing') {
-          await db.collection('orders').doc(orderId).update({
+          const update = {
             status: 'paid',
-            pixStatus: payment.status,
-            paidAt: new Date().toISOString()
-          });
+            paidAt: new Date().toISOString(),
+          };
+          // Marca o campo certo dependendo do método (PIX vs Card)
+          if (orderData.pixPaymentId) update.pixStatus = payment.status;
+          if (orderData.preferenceId) update.cardStatus = payment.status;
+          if (payment.id) update.mpPaymentId = String(payment.id);
 
-          console.log(`[CheckPix] Order ${orderId} marked as paid`);
+          await db.collection('orders').doc(orderId).update(update);
+
+          console.log(`[CheckPayment] Order ${orderId} marked as paid (method=${orderData.paymentMethod || 'pix'})`);
 
           // Notifica via WhatsApp (cliente + admin) — try/catch isolado pra
           // não derrubar a confirmação do pagamento se a notificação falhar.
@@ -106,11 +162,11 @@ exports.handler = async (event) => {
             const wa = require('./whatsapp-notify');
             await wa.notifyOrderPaid({ ...orderData, orderId, status: 'paid' });
           } catch (e) {
-            console.warn('[CheckPix] WhatsApp notify error:', e.message);
+            console.warn('[CheckPayment] WhatsApp notify error:', e.message);
           }
         }
       } catch (e) {
-        console.error('[CheckPix] Status update error:', e.message);
+        console.error('[CheckPayment] Status update error:', e.message);
         // Don't fail response if update fails
       }
     }
