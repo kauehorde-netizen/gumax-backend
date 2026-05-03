@@ -754,7 +754,9 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
       const myScore  = inA ? (matchData?.scoreA || 0) : (matchData?.scoreB || 0);
       const oppScore = inA ? (matchData?.scoreB || 0) : (matchData?.scoreA || 0);
 
-      const newEntry = {
+      // newEntry é construída DEPOIS do delta (ver mais abaixo). Inicializa
+      // o "esqueleto" aqui pra ficar visível antes do bloco de rating.
+      const baseEntry = {
         matchId,
         kills: s.kills || 0,
         deaths: s.deaths || 0,
@@ -771,31 +773,6 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
         team: inA ? 'A' : 'B',
         playedAt: admin.firestore.Timestamp.now(),
       };
-      // Mantém últimas 20 (pra histórico). Level usa só as últimas 10 via slice.
-      const recent10 = [...prevRecent, newEntry].slice(-20);
-      const last10ForLevel = recent10.slice(-10);
-
-      // KDR rolling = soma kills / soma deaths nas últimas 10
-      const recentKills  = last10ForLevel.reduce((acc, m) => acc + (m.kills  || 0), 0);
-      const recentDeaths = last10ForLevel.reduce((acc, m) => acc + (m.deaths || 0), 0);
-      const kdrRecent10 = recentKills / Math.max(1, recentDeaths);
-
-      // Win streak — conta vitórias consecutivas a partir do FIM (mais recente)
-      let winStreak = 0;
-      for (let i = recent10.length - 1; i >= 0; i--) {
-        if (recent10[i].result === 'win') winStreak++;
-        else break;
-      }
-
-      // Win/loss total (all-time)
-      const prevWins   = prev.wins   || 0;
-      const prevLosses = prev.losses || 0;
-      const newWins    = prevWins   + (result === 'win'  ? 1 : 0);
-      const newLosses  = prevLosses + (result === 'loss' ? 1 : 0);
-
-      // Level calculado a partir do KDR rolling
-      const level = computeLevel(kdrRecent10, newMatches);
-
       // ── v38-rating: CS Rating Premier-style ──
       // Primeiras 3 partidas = calibração (csRating fica null, acumula em
       // calibrationMatches[]). Após 3ª, calcula rating inicial.
@@ -836,6 +813,32 @@ async function aggregatePlayerStats(matchId, stats, matchData) {
       }
 
       const tierInfo = rating.getTierForRating(newCsRating);
+
+      // Agora que temos lastDelta calculado, monta a entry final do history
+      const newEntry = { ...baseEntry, delta: lastDelta };
+      const recent10 = [...prevRecent, newEntry].slice(-20);
+      const last10ForLevel = recent10.slice(-10);
+
+      // KDR rolling = soma kills / soma deaths nas últimas 10
+      const recentKills  = last10ForLevel.reduce((acc, m) => acc + (m.kills  || 0), 0);
+      const recentDeaths = last10ForLevel.reduce((acc, m) => acc + (m.deaths || 0), 0);
+      const kdrRecent10 = recentKills / Math.max(1, recentDeaths);
+
+      // Win streak — conta vitórias consecutivas a partir do FIM (mais recente)
+      let winStreak = 0;
+      for (let i = recent10.length - 1; i >= 0; i--) {
+        if (recent10[i].result === 'win') winStreak++;
+        else break;
+      }
+
+      // Win/loss total (all-time)
+      const prevWins   = prev.wins   || 0;
+      const prevLosses = prev.losses || 0;
+      const newWins    = prevWins   + (result === 'win'  ? 1 : 0);
+      const newLosses  = prevLosses + (result === 'loss' ? 1 : 0);
+
+      // Level calculado a partir do KDR rolling
+      const level = computeLevel(kdrRecent10, newMatches);
 
       tx.set(ref, {
         steamId,
@@ -952,6 +955,7 @@ async function handlePlayerProfile(steamId) {
       scoreOwn: m.scoreOwn || 0,
       scoreOpp: m.scoreOpp || 0,
       kdr: m.deaths > 0 ? Math.round((m.kills / m.deaths) * 100) / 100 : (m.kills || 0),
+      delta: typeof m.delta === 'number' ? m.delta : 0,  // v41-history-delta
       playedAt: m.playedAt?._seconds ? m.playedAt._seconds * 1000 : null,
     })),
     updatedAt: data.updatedAt?._seconds ? data.updatedAt._seconds * 1000 : null,
