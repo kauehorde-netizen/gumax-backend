@@ -1316,9 +1316,63 @@ exports.handler = async (event) => {
     case 'veto':    return handleVeto(event, matchId);
     case 'abort':   return handleAbort(event, matchId);
     case 'guard-validate': return handleGuardValidate(event, matchId);
+    case 'report': return handleReport(event, matchId);  // v41-reports
     default: return json(404, { error: 'unknown_action', action });
   }
 };
+
+// ── POST /api/match/:id/report ─────────────────────────────────────────
+// v41-reports: jogador denuncia outro jogador apos a partida.
+// Body: { targetSteamId, reason ('cheating'|'toxic'|'griefing'|'smurf'),
+//         details (string opcional) }
+// Validacoes:
+// - reporter precisa ter estado no match (teamA ou teamB)
+// - target precisa ter estado no match
+// - reason precisa ser uma das validas
+// - 1 report por reporter+target+match (idempotente)
+async function handleReport(event, matchId) {
+  const VALID_REASONS = ['cheating', 'toxic', 'griefing', 'smurf', 'other'];
+  const user = await require('./lobby').getAuth(event).catch(() => null);
+  if (!user) return json(401, { error: 'login_required' });
+  let body;
+  try { body = JSON.parse(event.body || '{}'); } catch { return json(400, { error: 'invalid_json' }); }
+  const targetSteamId = String(body.targetSteamId || '').trim();
+  const reason = String(body.reason || '').trim().toLowerCase();
+  const details = String(body.details || '').slice(0, 500);
+  if (!targetSteamId) return json(400, { error: 'missing_target' });
+  if (!VALID_REASONS.includes(reason)) return json(400, { error: 'invalid_reason', valid: VALID_REASONS });
+  const db = admin.firestore();
+  const matchSnap = await db.collection('matches').doc(matchId).get();
+  if (!matchSnap.exists) return json(404, { error: 'match_not_found' });
+  const m = matchSnap.data();
+  // Reporter precisa ter estado no match
+  const allPlayers = [...(m.teamA || []), ...(m.teamB || [])];
+  const reporter = allPlayers.find(p => p.uid === user.uid);
+  if (!reporter) return json(403, { error: 'not_in_match' });
+  // Target precisa ter estado no match (impede reportar quem nem jogou)
+  const target = allPlayers.find(p => p.steamId === targetSteamId);
+  if (!target) return json(400, { error: 'target_not_in_match' });
+  if (target.uid === user.uid) return json(400, { error: 'cant_report_self' });
+  // ID deterministico → idempotente (1 report por reporter+target+match)
+  const reportId = `${matchId}_${user.uid}_${targetSteamId}`;
+  const reportRef = db.collection('reports').doc(reportId);
+  const existing = await reportRef.get();
+  if (existing.exists) return json(409, { error: 'already_reported', reportId });
+  await reportRef.set({
+    matchId,
+    reporterUid: user.uid,
+    reporterSteamId: reporter.steamId || null,
+    reporterName: reporter.name || null,
+    targetSteamId,
+    targetName: target.name || null,
+    reason,
+    details,
+    status: 'pending',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
+  console.log(`[report] ${user.uid} reportou ${targetSteamId} (${reason}) no match ${matchId}`);
+  return json(201, { reportId, status: 'pending' });
+}
 
 // ── POST /:id/guard-validate ────────────────────────────────────────
 // GMAX GUARD desktop client chama esse endpoint pra: (1) validar que o

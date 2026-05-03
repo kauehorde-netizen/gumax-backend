@@ -298,6 +298,7 @@ app.post('/api/match/:id/confirm', rateLimit(60000, 30), wrapHandler(matchHandle
 app.post('/api/match/:id/veto',    rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/match/:id/abort',   rateLimit(60000, 30), wrapHandler(matchHandler)); // v36-nopass: cancela match preso (any player)
 app.post('/api/match/:id/guard-validate', rateLimit(60000, 60), wrapHandler(matchHandler)); // GUARD desktop client → recebe IP/porta secretos
+app.post('/api/match/:id/report', rateLimit(60000, 10), wrapHandler(matchHandler));         // v41-reports: denuncia jogador (rate-limit baixo)
 app.options('/api/match/*', (req, res) => res.sendStatus(204));
 
 // ── Inspect link resolver (busca link genérico do Steam Market pra skins sem ownership) ──

@@ -561,3 +561,4 @@ exports.handler = async (event) => {
 };
 
 exports.cleanupStaleLobbies = cleanupStaleLobbies;
+exports.getAuth = getAuth;  // v41-reports: usado em match.js handleReport
