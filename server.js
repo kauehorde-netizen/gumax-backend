@@ -496,6 +496,70 @@ function scheduleDailySnapshot() {
 }
 scheduleDailySnapshot();
 
+// ── v41-internal-cron: season reset automatico mensal ──
+// Roda a cada 30min checando se eh dia 01 entre 00:00-01:30 BRT (= 03:00-04:30 UTC)
+// e ainda nao rodou esse mes. Lock em Firestore: system/seasonReset.{yearMonth}.
+async function maybeRunSeasonReset() {
+  try {
+    // Fuso BRT (-3): se UTC eh entre 03:00-04:30, sao 00:00-01:30 BRT.
+    const nowUtc = new Date();
+    const utcHour = nowUtc.getUTCHours();
+    const utcMin  = nowUtc.getUTCMinutes();
+    const utcDay  = nowUtc.getUTCDate();
+    if (utcDay !== 1) return;
+    if (!(utcHour === 3 || (utcHour === 4 && utcMin <= 30))) return;
+    // Calcula yearMonth no fuso BRT (subtrai 3h)
+    const brt = new Date(nowUtc.getTime() - 3 * 3600 * 1000);
+    const yearMonth = `${brt.getUTCFullYear()}-${String(brt.getUTCMonth() + 1).padStart(2, '0')}`;
+    const db = admin.firestore();
+    const lockRef = db.collection('system').doc('seasonReset');
+    // Tenta criar o lock atomicamente — se ja existe pra esse yearMonth, skipa
+    const result = await db.runTransaction(async (tx) => {
+      const snap = await tx.get(lockRef);
+      const data = snap.exists ? snap.data() : {};
+      if (data[yearMonth]) return { skipped: true, reason: 'already_ran' };
+      tx.set(lockRef, { ...data, [yearMonth]: { startedAt: admin.firestore.FieldValue.serverTimestamp() } }, { merge: true });
+      return { skipped: false };
+    });
+    if (result.skipped) return;
+    console.log(`[cron] season-reset disparado pra ${yearMonth}`);
+    // Reseta todos os playerStats: csRating null, calibrating true
+    const psSnap = await db.collection('playerStats').get();
+    let count = 0;
+    const BATCH_SIZE = 400;
+    for (let i = 0; i < psSnap.docs.length; i += BATCH_SIZE) {
+      const batch = db.batch();
+      psSnap.docs.slice(i, i + BATCH_SIZE).forEach(doc => {
+        const d = doc.data();
+        batch.update(doc.ref, {
+          csRating: null,
+          calibrating: true,
+          calibrationProgress: 0,
+          calibrationMatches: [],
+          tier: 'calibrating',
+          tierName: 'Calibrando',
+          tierColor: '#6b7280',
+          lastSeasonRating: d.csRating ?? null,
+          lastSeasonTier: d.tier ?? null,
+          lastSeasonTierName: d.tierName ?? null,
+          seasonResetAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        count++;
+      });
+      await batch.commit();
+    }
+    await lockRef.set({ [yearMonth]: { startedAt: admin.firestore.FieldValue.serverTimestamp(), completedAt: admin.firestore.FieldValue.serverTimestamp(), playerCount: count } }, { merge: true });
+    console.log(`[cron] season-reset OK: ${count} jogadores resetados pra ${yearMonth}`);
+  } catch (e) {
+    console.error('[cron] season-reset falhou:', e.message);
+  }
+}
+// Checa a cada 30 minutos (frequencia conservadora — mesmo se Railway reiniciar
+// e perder um tick, no proximo o lock garante que so roda 1x por mes)
+setInterval(maybeRunSeasonReset, 30 * 60 * 1000);
+// Roda 1x logo no startup pra cobrir caso Railway reinicie no horario certo
+setTimeout(maybeRunSeasonReset, 30 * 1000);
+
 // ── Start server ──
 app.listen(PORT, () => {
   console.log(`[Server] Gumax Skins API running on port ${PORT}`);
