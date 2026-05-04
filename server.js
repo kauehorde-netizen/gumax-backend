@@ -294,6 +294,7 @@ app.get('/api/match/players',   rateLimit(60000, 120), wrapHandler(matchHandler)
 app.get('/api/match/player/:steamId', rateLimit(60000, 60), wrapHandler(matchHandler)); // perfil completo do player
 app.get('/api/match/:id',       rateLimit(60000, 120), wrapHandler(matchHandler));
 app.get('/api/match/:id/matchzy-config', rateLimit(60000, 30), wrapHandler(matchHandler)); // público pro MatchZy
+app.get('/api/match/:id/scoreboard',     rateLimit(60000, 60), wrapHandler(matchHandler)); // v48-scoreboard: publico pra historico
 app.post('/api/match/:id/confirm', rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/match/:id/veto',    rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/match/:id/abort',   rateLimit(60000, 30), wrapHandler(matchHandler)); // v36-nopass: cancela match preso (any player)

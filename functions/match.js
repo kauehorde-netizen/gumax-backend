@@ -99,6 +99,45 @@ async function handleGet(event, matchId) {
   return json(200, { id: matchId, ...result.data });
 }
 
+// v48-scoreboard: GET /api/match/:id/scoreboard — PUBLICO (sem auth).
+// Retorna so dados nao-sensiveis pra renderizar scoreboard do historico.
+// Filtra serverInfo/password/confirmations.
+async function handleScoreboard(matchId) {
+  const db = admin.firestore();
+  const snap = await db.collection('matches').doc(matchId).get();
+  if (!snap.exists) return json(404, { error: 'match_not_found' });
+  const d = snap.data();
+  // Sanitiza teamA/teamB pra remover qualquer campo sensivel
+  const cleanPlayer = (p) => ({
+    uid: p.uid || null,
+    steamId: p.steamId || null,
+    name: p.name || 'Player',
+    avatar: p.avatar || '',
+  });
+  const teamA = (d.teamA || []).map(cleanPlayer);
+  const teamB = (d.teamB || []).map(cleanPlayer);
+  // Stats por steamId
+  const stats = d.stats || {};
+  return json(200, {
+    id: matchId,
+    status: d.status || null,
+    winner: d.winner || null,
+    scoreA: d.scoreA || 0,
+    scoreB: d.scoreB || 0,
+    teamA, teamB,
+    map: d.mapVeto?.finalMap || null,
+    mapVeto: {
+      pool: d.mapVeto?.pool || [],
+      actions: d.mapVeto?.actions || [],
+      finalMap: d.mapVeto?.finalMap || null,
+    },
+    stats,                  // { steamId: { kills, deaths, assists, adr, hsRate, mvps, rating, headshotKills } }
+    demoUrl: d.demoUrl || null,
+    createdAt: d.createdAt?._seconds ? d.createdAt._seconds * 1000 : null,
+    finishedAt: d.finishedAt?._seconds ? d.finishedAt._seconds * 1000 : null,
+  });
+}
+
 // ── POST /:id/confirm — jogador confirma "tô no PC" ───────────────────────
 // Quando os 10 confirmam, status pula automático pra 'mappick' (transação).
 // Se passar dos 90s sem todos confirmarem, status vai pra 'cancelled'.
@@ -1308,6 +1347,8 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'GET' && !action) return handleGet(event, matchId);
   // GET /api/match/:id/matchzy-config — JSON pro MatchZy puxar (público, no auth)
   if (event.httpMethod === 'GET' && action === 'matchzy-config') return handleMatchzyConfig(matchId);
+  // v48-scoreboard: rota publica (sem auth) pra historico/perfil
+  if (event.httpMethod === 'GET' && action === 'scoreboard') return handleScoreboard(matchId);
 
   if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
 
