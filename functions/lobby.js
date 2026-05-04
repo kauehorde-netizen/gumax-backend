@@ -596,6 +596,26 @@ async function handleChallenge(event, lobbyId) {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
   });
+
+  // v48-push: notifica todos os membros do target lobby (fire-and-forget)
+  try {
+    const tgtSnap = await db.collection('lobbies').doc(body.targetLobbyId).get();
+    const tgtData = tgtSnap.exists ? tgtSnap.data() : null;
+    const targetUids = (tgtData?.slots || []).filter(s => s != null).map(s => s.uid);
+    const mySnap = await db.collection('lobbies').doc(lobbyId).get();
+    const myData = mySnap.exists ? mySnap.data() : null;
+    if (targetUids.length) {
+      const push = require('./push');
+      push.sendPushToUsers(targetUids, {
+        title: '⚔️ Novo desafio!',
+        body: `${myData?.name || 'Uma sala'} desafiou seu time. Aceite em 30s!`,
+        icon: '/gmax-league-logo.png',
+        url: '/lobbies.html',
+        tag: `challenge-${lobbyId}`,
+      }).catch(() => {});
+    }
+  } catch (e) { console.warn('[push:challenge] falhou:', e.message); }
+
   return json(200, { ok: true, expiresAt: expiresAtMs });
 }
 
@@ -680,6 +700,22 @@ async function handleAcceptChallenge(event, lobbyId) {
       challengedBy: null, challengeTo: null, challengeExpiresAt: null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // v48-push: notifica todos os players do match pra abrirem match.html
+    try {
+      const allUids = [...teamA.map(p => p.uid), ...teamB.map(p => p.uid)].filter(Boolean);
+      if (allUids.length) {
+        const push = require('./push');
+        push.sendPushToUsers(allUids, {
+          title: '🎮 Match começou!',
+          body: 'Confirme presença em 30s pra entrar no servidor.',
+          icon: '/gmax-league-logo.png',
+          url: `/match.html?id=${matchId}`,
+          tag: `match-${matchId}`,
+          requireInteraction: true,
+        }).catch(() => {});
+      }
+    } catch (e) { console.warn('[push:accept] falhou:', e.message); }
 
     // Coleta lobbies AFETADOS pra cleanup pos-transacao (challenges cruzados)
     // Pra cada outro challenger no meu pendingIncoming (exceto o aceito) → limpa pendingOutgoing[meId] dele

@@ -52,6 +52,8 @@ setInterval(() => {
 
 // Middleware
 app.use(cors());
+const pushHandler = require('./functions/push').handler;
+
 app.use(express.json({ limit: '10mb' }));
 
 // ── Security headers ──
@@ -292,6 +294,13 @@ app.post('/api/admin/season-reset',   rateLimit(60000, 5),  wrapHandler(matchHan
 app.get ('/api/admin/reports',                  rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/admin/reports/:id/action',       rateLimit(60000, 30), wrapHandler(matchHandler));
 app.post('/api/admin/unban',                    rateLimit(60000, 10), wrapHandler(matchHandler));
+
+// v48-push: notificacoes
+app.get ('/api/push/public-key',  rateLimit(60000, 60), wrapHandler(pushHandler));
+app.post('/api/push/subscribe',   rateLimit(60000, 30), wrapHandler(pushHandler));
+app.post('/api/push/unsubscribe', rateLimit(60000, 30), wrapHandler(pushHandler));
+app.post('/api/push/test',        rateLimit(60000, 10), wrapHandler(pushHandler));
+app.options('/api/push/*', (req, res) => res.sendStatus(204));
 app.post('/api/debug/simulate-match', rateLimit(60000, 10), wrapHandler(matchHandler)); // v38-debug: simula match pra validar pipeline MatchZy
 app.get('/api/match/ranking',   rateLimit(60000, 60),  wrapHandler(matchHandler));
 app.get('/api/match/players',   rateLimit(60000, 120), wrapHandler(matchHandler)); // batch stats (level/KDR) pra lobbies
