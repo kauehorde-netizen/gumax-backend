@@ -74,6 +74,8 @@ function json(code, body) {
 const LOBBY_MAX_AGE_MS = 20 * 60 * 1000;
 // TTL do desafio: 30s. Se a outra sala não aceitar nesse tempo, expira.
 const CHALLENGE_TTL_MS = 30 * 1000;
+// v48-multi-challenge: cap de challenges simultaneos por sala (anti-spam)
+const MAX_OUTGOING_CHALLENGES = 10;
 
 // Garante user está logado. Retorna {uid, displayName, photoURL, steamId} ou null.
 async function getAuth(event) {
@@ -190,6 +192,63 @@ async function cleanupStaleLobbies() {
       console.log(`[lobby:cleanup] challenge expirado: challenger=${ec.challengerId} target=${ec.targetId}`);
     }
     await cleanupBatch.commit().catch(e => console.warn('[lobby:cleanup] challenge-expire batch failed:', e.message));
+  }
+
+  // v48-multi-challenge: varre pendingIncoming/Outgoing maps e limpa entries expiradas.
+  // Mantém os 2 lados consistentes (se A.outgoing[B] expirou, limpa B.incoming[A]).
+  const mapEntriesBatch = db.batch();
+  let mapClearOps = 0;
+  snap.docs.forEach(d => {
+    const data = d.data();
+    const outgoing = data.pendingOutgoing || {};
+    const incoming = data.pendingIncoming || {};
+    const updates = {};
+    let dirty = false;
+    let recalcOutgoingCache = false;
+    let recalcIncomingCache = false;
+    for (const [tid, entry] of Object.entries(outgoing)) {
+      const exp = entry?.expiresAt?.toMillis ? entry.expiresAt.toMillis() : 0;
+      if (exp && exp < now) {
+        updates[`pendingOutgoing.${tid}`] = admin.firestore.FieldValue.delete();
+        dirty = true; recalcOutgoingCache = true;
+      }
+    }
+    for (const [cid, entry] of Object.entries(incoming)) {
+      const exp = entry?.expiresAt?.toMillis ? entry.expiresAt.toMillis() : 0;
+      if (exp && exp < now) {
+        updates[`pendingIncoming.${cid}`] = admin.firestore.FieldValue.delete();
+        dirty = true; recalcIncomingCache = true;
+      }
+    }
+    if (dirty) {
+      // Recalcula cache fields legacy (challengeTo/challengedBy = primeira entry restante valida)
+      if (recalcOutgoingCache) {
+        const remaining = Object.entries(outgoing).filter(([k, v]) => {
+          const exp = v?.expiresAt?.toMillis ? v.expiresAt.toMillis() : 0;
+          return exp > now;
+        });
+        updates['challengeTo'] = remaining.length > 0 ? remaining[0][0] : null;
+      }
+      if (recalcIncomingCache) {
+        const remaining = Object.entries(incoming).filter(([k, v]) => {
+          const exp = v?.expiresAt?.toMillis ? v.expiresAt.toMillis() : 0;
+          return exp > now;
+        });
+        updates['challengedBy'] = remaining.length > 0 ? remaining[0][0] : null;
+        if (remaining.length > 0 && remaining[0][1]?.expiresAt) {
+          updates['challengeExpiresAt'] = remaining[0][1].expiresAt;
+        } else {
+          updates['challengeExpiresAt'] = null;
+        }
+      }
+      updates['updatedAt'] = admin.firestore.FieldValue.serverTimestamp();
+      mapEntriesBatch.update(d.ref, updates);
+      mapClearOps++;
+    }
+  });
+  if (mapClearOps > 0) {
+    await mapEntriesBatch.commit().catch(e => console.warn('[lobby:cleanup] map-expire batch failed:', e.message));
+    console.log(`[lobby:cleanup] limpou ${mapClearOps} lobbies com entries expiradas em pendingIn/Out`);
   }
 
   snap.docs.forEach(d => {
@@ -462,17 +521,22 @@ async function handleKick(event, lobbyId) {
 }
 
 // ───── POST /:id/challenge {targetLobbyId} ───────────────────────────────
-// Sala A (cheia) desafia sala B (cheia). Marca challengedBy em B.
-// B precisa aceitar em 30s. Apenas owner desafia.
+// v48-multi-challenge: sala A desafia N salas simultaneas (estilo GC).
+// Adiciona em pendingOutgoing[targetId] / pendingIncoming[meId] com expiresAt.
+// Status NAO muda — sala continua disponivel pra desafiar mais.
+// Cap MAX_OUTGOING_CHALLENGES (10) anti-spam.
 async function handleChallenge(event, lobbyId) {
   const user = await getAuth(event);
   if (!user) return json(401, { error: 'login_required' });
   const body = JSON.parse(event.body || '{}');
   if (!body.targetLobbyId) return json(400, { error: 'missing_targetLobbyId' });
+  if (lobbyId === body.targetLobbyId) return json(400, { error: 'cant_challenge_self' });
 
   const db = admin.firestore();
   const myRef = db.collection('lobbies').doc(lobbyId);
   const targetRef = db.collection('lobbies').doc(body.targetLobbyId);
+  const expiresAtMs = Date.now() + CHALLENGE_TTL_MS;
+  const expiresAtTs = admin.firestore.Timestamp.fromMillis(expiresAtMs);
 
   await db.runTransaction(async (tx) => {
     const [mine, target] = await Promise.all([tx.get(myRef), tx.get(targetRef)]);
@@ -480,64 +544,99 @@ async function handleChallenge(event, lobbyId) {
     const me = mine.data();
     const tgt = target.data();
     if (me.ownerId !== user.uid) throw new Error('not_owner');
-    // v33-test: validação 'full' DESLIGADA permanente até closed beta. Pra reativar:
-    // 1. Apaga essas duas linhas comentadas
-    // 2. Descomenta as 2 linhas if/throw acima
-    // (env var ALLOW_PARTIAL_CHALLENGE virou no-op — código sempre permite challenge parcial)
-    console.log('[Lobby] challenge: me.status=' + me.status + ' tgt.status=' + tgt.status + ' (validation skipped — debug mode)');
-    if (tgt.challengedBy) throw new Error('target_already_challenged');
-    if (lobbyId === body.targetLobbyId) throw new Error('cant_challenge_self');
+    if (me.status === 'in_match' || tgt.status === 'in_match') throw new Error('already_in_match');
 
-    tx.update(targetRef, {
-      challengedBy: lobbyId,
-      challengeExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + CHALLENGE_TTL_MS),
-      status: 'challenged',
+    // Limpa entradas expiradas do meu pendingOutgoing antes de validar cap
+    const now = Date.now();
+    const myOutgoing = me.pendingOutgoing || {};
+    let activeCount = 0;
+    for (const [tid, entry] of Object.entries(myOutgoing)) {
+      const exp = entry?.expiresAt?.toMillis ? entry.expiresAt.toMillis() : 0;
+      if (exp > now && tid !== body.targetLobbyId) activeCount++;
+    }
+    if (activeCount >= MAX_OUTGOING_CHALLENGES) throw new Error('too_many_outgoing');
+
+    // Update meu: adiciona target ao map outgoing + cache field
+    const newMyOutgoing = { ...myOutgoing, [body.targetLobbyId]: { expiresAt: expiresAtTs } };
+    tx.update(myRef, {
+      pendingOutgoing: newMyOutgoing,
+      // Cache fields legacy (frontend antigo): primeira entrada ativa
+      challengeTo: body.targetLobbyId,
+      challengeExpiresAt: expiresAtTs,
+      // status NAO muda — fica 'full' pra poder desafiar mais
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
-    tx.update(myRef, {
-      status: 'challenged',
-      challengeTo: body.targetLobbyId,
+
+    // Update target: adiciona meu lobby ao map incoming + cache field
+    const tgtIncoming = tgt.pendingIncoming || {};
+    const newTgtIncoming = { ...tgtIncoming, [lobbyId]: { expiresAt: expiresAtTs } };
+    tx.update(targetRef, {
+      pendingIncoming: newTgtIncoming,
+      // Cache field legacy: primeiro challenger pendente
+      challengedBy: lobbyId,
+      challengeExpiresAt: expiresAtTs,
+      // status NAO muda mais pra 'challenged' — sala continua 'full' e pode receber outros
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
   });
-  return json(200, { ok: true, expiresAt: Date.now() + CHALLENGE_TTL_MS });
+  return json(200, { ok: true, expiresAt: expiresAtMs });
 }
 
 // ───── POST /:id/accept-challenge ────────────────────────────────────────
-// Owner da sala desafiada aceita → cria match e ambas viram in_match.
+// v48-multi-challenge: aceita challenger especifico (body.challengerId).
+// Compat: sem challengerId, usa primeiro pendingIncoming nao expirado (= challengedBy legacy).
+// Apos aceitar, cancela todos os OUTROS challenges relacionados aos 2 lobbies.
 async function handleAcceptChallenge(event, lobbyId) {
   const user = await getAuth(event);
   if (!user) return json(401, { error: 'login_required' });
+  const body = JSON.parse(event.body || '{}');
 
   const db = admin.firestore();
   const myRef = db.collection('lobbies').doc(lobbyId);
 
   let matchId = null;
+  let acceptedChallengerId = null;
+  let lobbiesToCleanup = [];  // [{lobbyId, removeOutgoing: [targetIds], removeIncoming: [challengerIds]}]
   await db.runTransaction(async (tx) => {
     const mine = await tx.get(myRef);
     if (!mine.exists) throw new Error('not_found');
     const me = mine.data();
     if (me.ownerId !== user.uid) throw new Error('not_owner');
-    if (!me.challengedBy) throw new Error('no_pending_challenge');
-    if (me.challengeExpiresAt?.toMillis && me.challengeExpiresAt.toMillis() < Date.now()) {
-      throw new Error('challenge_expired');
-    }
+    if (me.status === 'in_match') throw new Error('already_in_match');
 
-    const otherRef = db.collection('lobbies').doc(me.challengedBy);
+    // Determina qual challenger aceitar
+    const incoming = me.pendingIncoming || {};
+    const now = Date.now();
+    let chId = body.challengerId || me.challengedBy;
+    if (!chId) {
+      // Pega primeiro nao expirado
+      for (const [k, v] of Object.entries(incoming)) {
+        const exp = v?.expiresAt?.toMillis ? v.expiresAt.toMillis() : 0;
+        if (exp > now) { chId = k; break; }
+      }
+    }
+    if (!chId) throw new Error('no_pending_challenge');
+    const chEntry = incoming[chId];
+    const chExp = chEntry?.expiresAt?.toMillis ? chEntry.expiresAt.toMillis() : (me.challengeExpiresAt?.toMillis ? me.challengeExpiresAt.toMillis() : 0);
+    if (chExp && chExp < now) throw new Error('challenge_expired');
+    acceptedChallengerId = chId;
+
+    const otherRef = db.collection('lobbies').doc(chId);
     const other = await tx.get(otherRef);
     if (!other.exists) throw new Error('other_lobby_gone');
+    const otherData = other.data();
+    if (otherData.status === 'in_match') throw new Error('already_matched');
 
-    // Cria o match — IDs dos dois lobbies + 10 jogadores
+    // Cria o match — IDs dos dois lobbies + jogadores
     const matchRef = db.collection('matches').doc();
     matchId = matchRef.id;
-    const teamA = (other.data().slots || []).filter(Boolean);
+    const teamA = (otherData.slots || []).filter(Boolean);  // challenger = teamA
     const teamB = (me.slots || []).filter(Boolean);
     tx.set(matchRef, {
-      lobbyA: me.challengedBy,
+      lobbyA: chId,
       lobbyB: lobbyId,
       teamA, teamB,
       status: 'confirming',
-      // Cada jogador precisa confirmar em 30s. Default = false.
       confirmations: [...teamA, ...teamB].reduce((acc, p) => { acc[p.uid] = false; return acc; }, {}),
       confirmExpiresAt: admin.firestore.Timestamp.fromMillis(Date.now() + 30 * 1000),
       mapVeto: {
@@ -551,75 +650,173 @@ async function handleAcceptChallenge(event, lobbyId) {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
+    // Limpa AMBOS os mapas dos 2 lobbies (vao pra in_match — sem mais challenges)
     tx.update(myRef, {
       status: 'in_match', matchId,
-      challengedBy: null, challengeExpiresAt: null,
+      pendingIncoming: {}, pendingOutgoing: {},
+      challengedBy: null, challengeTo: null, challengeExpiresAt: null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
     tx.update(otherRef, {
       status: 'in_match', matchId,
-      challengeTo: null,
+      pendingIncoming: {}, pendingOutgoing: {},
+      challengedBy: null, challengeTo: null, challengeExpiresAt: null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // Coleta lobbies AFETADOS pra cleanup pos-transacao (challenges cruzados)
+    // Pra cada outro challenger no meu pendingIncoming (exceto o aceito) → limpa pendingOutgoing[meId] dele
+    for (const otherChId of Object.keys(me.pendingIncoming || {})) {
+      if (otherChId === chId) continue;
+      lobbiesToCleanup.push({ id: otherChId, removeOutgoing: [lobbyId] });
+    }
+    // Pra cada target no meu pendingOutgoing → limpa pendingIncoming[meId] dele
+    for (const targetId of Object.keys(me.pendingOutgoing || {})) {
+      lobbiesToCleanup.push({ id: targetId, removeIncoming: [lobbyId] });
+    }
+    // Pra cada outro challenger no incoming do other (exceto eu) → limpa pendingOutgoing[other.id] dele
+    for (const otherChId of Object.keys(otherData.pendingIncoming || {})) {
+      if (otherChId === lobbyId) continue;
+      lobbiesToCleanup.push({ id: otherChId, removeOutgoing: [chId] });
+    }
+    // Pra cada target no outgoing do other (exceto eu) → limpa pendingIncoming[other.id] dele
+    for (const targetId of Object.keys(otherData.pendingOutgoing || {})) {
+      if (targetId === lobbyId) continue;
+      lobbiesToCleanup.push({ id: targetId, removeIncoming: [chId] });
+    }
   });
 
-  return json(200, { ok: true, matchId });
+  // Cleanup pos-transacao (best-effort, fora do TX pra evitar limite de docs)
+  if (lobbiesToCleanup.length > 0) {
+    const batch = db.batch();
+    // Agrupa por lobbyId pra evitar update duplo no mesmo doc
+    const byId = {};
+    for (const item of lobbiesToCleanup) {
+      if (!byId[item.id]) byId[item.id] = { removeOutgoing: new Set(), removeIncoming: new Set() };
+      (item.removeOutgoing || []).forEach(x => byId[item.id].removeOutgoing.add(x));
+      (item.removeIncoming || []).forEach(x => byId[item.id].removeIncoming.add(x));
+    }
+    for (const [lid, ops] of Object.entries(byId)) {
+      const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+      ops.removeOutgoing.forEach(tid => { updates[`pendingOutgoing.${tid}`] = admin.firestore.FieldValue.delete(); });
+      ops.removeIncoming.forEach(cid => { updates[`pendingIncoming.${cid}`] = admin.firestore.FieldValue.delete(); });
+      batch.update(db.collection('lobbies').doc(lid), updates);
+    }
+    await batch.commit().catch(e => console.warn('[lobby:accept] cleanup batch falhou:', e.message));
+  }
+
+  return json(200, { ok: true, matchId, acceptedFrom: acceptedChallengerId });
 }
 
 // ───── POST /:id/decline-challenge ───────────────────────────────────────
+// v48-multi-challenge: declina challenger especifico (body.challengerId).
+// Sem param → declina TODOS pendentes (compat).
 async function handleDeclineChallenge(event, lobbyId) {
   const user = await getAuth(event);
   if (!user) return json(401, { error: 'login_required' });
+  const body = JSON.parse(event.body || '{}');
   const db = admin.firestore();
   const myRef = db.collection('lobbies').doc(lobbyId);
+  let removedChallengers = [];
   await db.runTransaction(async (tx) => {
     const mine = await tx.get(myRef);
     if (!mine.exists) throw new Error('not_found');
     const me = mine.data();
     if (me.ownerId !== user.uid) throw new Error('not_owner');
-    if (!me.challengedBy) return;
-    const otherRef = db.collection('lobbies').doc(me.challengedBy);
-    tx.update(otherRef, {
-      status: 'full', challengeTo: null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-    tx.update(myRef, {
-      status: 'full', challengedBy: null, challengeExpiresAt: null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  });
-  return json(200, { ok: true });
-}
+    const incoming = me.pendingIncoming || {};
+    const targetIds = body.challengerId ? [body.challengerId] : Object.keys(incoming);
+    if (!targetIds.length && !me.challengedBy) return;
+    // Tambem cobre legacy se challengedBy nao esta no map
+    if (me.challengedBy && !incoming[me.challengedBy] && !body.challengerId) {
+      targetIds.push(me.challengedBy);
+    }
+    removedChallengers = targetIds;
 
-// ───── POST /:id/cancel-challenge ────────────────────────────────────────
-// Chamado pelo CHALLENGER (lado que mandou o desafio) quando o timer expira
-// sem o desafiado responder. Limpa estado dos 2 lados pra liberar nova ação.
-async function handleCancelChallenge(event, lobbyId) {
-  const user = await getAuth(event);
-  if (!user) return json(401, { error: 'login_required' });
-  const db = admin.firestore();
-  const myRef = db.collection('lobbies').doc(lobbyId);
-  await db.runTransaction(async (tx) => {
-    const mine = await tx.get(myRef);
-    if (!mine.exists) throw new Error('not_found');
-    const me = mine.data();
-    if (me.ownerId !== user.uid) throw new Error('not_owner');
-    if (!me.challengeTo) return;  // nada pra cancelar
-    const otherRef = db.collection('lobbies').doc(me.challengeTo);
-    const other = await tx.get(otherRef);
-    if (other.exists && other.data().challengedBy === lobbyId) {
-      tx.update(otherRef, {
-        status: 'full', challengedBy: null, challengeExpiresAt: null,
+    // Limpa cada entry no meu pendingIncoming
+    const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    for (const cid of targetIds) {
+      updates[`pendingIncoming.${cid}`] = admin.firestore.FieldValue.delete();
+    }
+    // Recalcula cache fields legacy
+    const remaining = Object.keys(incoming).filter(k => !targetIds.includes(k));
+    if (remaining.length === 0) {
+      updates['challengedBy'] = null;
+      updates['challengeExpiresAt'] = null;
+    } else {
+      updates['challengedBy'] = remaining[0];
+      const exp = incoming[remaining[0]]?.expiresAt;
+      if (exp) updates['challengeExpiresAt'] = exp;
+    }
+    tx.update(myRef, updates);
+  });
+
+  // Limpa contraparte (pendingOutgoing[meId] do challenger) fora da TX
+  if (removedChallengers.length > 0) {
+    const batch = db.batch();
+    for (const cid of removedChallengers) {
+      const otherRef = db.collection('lobbies').doc(cid);
+      batch.update(otherRef, {
+        [`pendingOutgoing.${lobbyId}`]: admin.firestore.FieldValue.delete(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
     }
-    tx.update(myRef, {
-      status: 'full', challengeTo: null, challengeExpiresAt: null,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-  });
-  return json(200, { ok: true });
+    await batch.commit().catch(e => console.warn('[lobby:decline] cleanup batch falhou:', e.message));
+  }
+  return json(200, { ok: true, declined: removedChallengers });
 }
+
+// ───── POST /:id/cancel-challenge ────────────────────────────────────────
+// v48-multi-challenge: cancela challenge especifico (body.targetId).
+// Sem param → cancela TODOS outgoing.
+async function handleCancelChallenge(event, lobbyId) {
+  const user = await getAuth(event);
+  if (!user) return json(401, { error: 'login_required' });
+  const body = JSON.parse(event.body || '{}');
+  const db = admin.firestore();
+  const myRef = db.collection('lobbies').doc(lobbyId);
+  let removedTargets = [];
+  await db.runTransaction(async (tx) => {
+    const mine = await tx.get(myRef);
+    if (!mine.exists) throw new Error('not_found');
+    const me = mine.data();
+    if (me.ownerId !== user.uid) throw new Error('not_owner');
+    const outgoing = me.pendingOutgoing || {};
+    const targetIds = body.targetId ? [body.targetId] : Object.keys(outgoing);
+    if (!targetIds.length && !me.challengeTo) return;
+    if (me.challengeTo && !outgoing[me.challengeTo] && !body.targetId) {
+      targetIds.push(me.challengeTo);
+    }
+    removedTargets = targetIds;
+
+    const updates = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+    for (const tid of targetIds) {
+      updates[`pendingOutgoing.${tid}`] = admin.firestore.FieldValue.delete();
+    }
+    const remaining = Object.keys(outgoing).filter(k => !targetIds.includes(k));
+    if (remaining.length === 0) {
+      updates['challengeTo'] = null;
+      // challengeExpiresAt pode tambem ser do incoming, so zera se nao tiver incoming
+      if (!Object.keys(me.pendingIncoming || {}).length) updates['challengeExpiresAt'] = null;
+    } else {
+      updates['challengeTo'] = remaining[0];
+    }
+    tx.update(myRef, updates);
+  });
+
+  if (removedTargets.length > 0) {
+    const batch = db.batch();
+    for (const tid of removedTargets) {
+      const otherRef = db.collection('lobbies').doc(tid);
+      batch.update(otherRef, {
+        [`pendingIncoming.${lobbyId}`]: admin.firestore.FieldValue.delete(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+    await batch.commit().catch(e => console.warn('[lobby:cancel] cleanup batch falhou:', e.message));
+  }
+  return json(200, { ok: true, cancelled: removedTargets });
+}
+
 
 // ─── Handler HTTP ────────────────────────────────────────────────────────
 exports.handler = async (event) => {
