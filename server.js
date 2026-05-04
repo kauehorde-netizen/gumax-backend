@@ -288,6 +288,10 @@ app.options('/api/lobby/*', (req, res) => res.sendStatus(204));
 app.post('/api/match/webhook',  rateLimit(60000, 60),  wrapHandler(matchHandler)); // sem auth — secret no header
 app.get('/api/rating/leaderboard',    rateLimit(60000, 30), wrapHandler(matchHandler)); // v38-rating: top jogadores
 app.post('/api/admin/season-reset',   rateLimit(60000, 5),  wrapHandler(matchHandler)); // v38-rating: reset mensal (secret-protected)
+// v48-admin-reports: gestao de denuncias (secret-protected)
+app.get ('/api/admin/reports',                  rateLimit(60000, 30), wrapHandler(matchHandler));
+app.post('/api/admin/reports/:id/action',       rateLimit(60000, 30), wrapHandler(matchHandler));
+app.post('/api/admin/unban',                    rateLimit(60000, 10), wrapHandler(matchHandler));
 app.post('/api/debug/simulate-match', rateLimit(60000, 10), wrapHandler(matchHandler)); // v38-debug: simula match pra validar pipeline MatchZy
 app.get('/api/match/ranking',   rateLimit(60000, 60),  wrapHandler(matchHandler));
 app.get('/api/match/players',   rateLimit(60000, 120), wrapHandler(matchHandler)); // batch stats (level/KDR) pra lobbies

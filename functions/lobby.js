@@ -421,6 +421,23 @@ async function handleJoin(event, lobbyId) {
   if (!user) return json(401, { error: 'login_required' });
   const db = admin.firestore();
 
+  // v48-admin-reports: bloqueia entrada de player banido
+  if (user.steamId) {
+    try {
+      const ps = await db.collection('playerStats').doc(user.steamId).get();
+      const banUntil = ps.exists ? (ps.data().bannedUntil?.toMillis ? ps.data().bannedUntil.toMillis() : 0) : 0;
+      if (banUntil && banUntil > Date.now()) {
+        const remainingHrs = Math.ceil((banUntil - Date.now()) / 3600000);
+        return json(403, {
+          error: 'banned',
+          reason: ps.data().bannedReason || 'unknown',
+          bannedUntil: banUntil,
+          remainingHours: remainingHrs,
+        });
+      }
+    } catch (e) { console.warn('[lobby:join] ban check failed:', e.message); }
+  }
+
   // User só pode estar em 1 lobby
   const existing = await db.collection('lobbies')
     .where('memberUids', 'array-contains', user.uid)

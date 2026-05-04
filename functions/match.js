@@ -1329,6 +1329,11 @@ exports.handler = async (event) => {
   // v38-rating: rating endpoints
   if (event.httpMethod === 'GET' && path.endsWith('/rating/leaderboard')) return handleLeaderboard(event);
   if (event.httpMethod === 'POST' && path.endsWith('/admin/season-reset')) return handleSeasonReset(event);
+  // v48-admin-reports
+  if (event.httpMethod === 'GET' && path.endsWith('/admin/reports')) return handleAdminReportsList(event);
+  if (event.httpMethod === 'POST' && path.endsWith('/admin/unban')) return handleAdminUnban(event);
+  const adminReportMatch = path.match(/\/api\/admin\/reports\/([^/]+)\/action$/);
+  if (event.httpMethod === 'POST' && adminReportMatch) return handleAdminReportAction(event, adminReportMatch[1]);
   // /api/match/ranking (GET, público)
   if (event.httpMethod === 'GET' && path.endsWith('/ranking')) return handleRanking();
   // /api/match/players?ids=... (GET, público — batch stats pra mostrar level/KDR em lobby)
@@ -1414,6 +1419,98 @@ async function handleReport(event, matchId) {
   console.log(`[report] ${user.uid} reportou ${targetSteamId} (${reason}) no match ${matchId}`);
   return json(201, { reportId, status: 'pending' });
 }
+
+// v48-admin-reports: lista reports (pending por padrao). Auth via secret.
+async function handleAdminReportsList(event) {
+  const expectedSecret = process.env.ADMIN_SECRET || process.env.DEBUG_SECRET || process.env.MATCHZY_WEBHOOK_SECRET || '';
+  const auth = (event.headers?.authorization || event.headers?.Authorization || '').replace(/^Bearer\s+/i, '');
+  const queryKey = (event.queryStringParameters?.key || '');
+  if (!expectedSecret || (auth !== expectedSecret && queryKey !== expectedSecret)) {
+    return json(401, { error: 'invalid_secret' });
+  }
+  const status = event.queryStringParameters?.status || 'pending';
+  const db = admin.firestore();
+  const snap = await db.collection('reports')
+    .where('status', '==', status)
+    .orderBy('createdAt', 'desc')
+    .limit(200).get();
+  const reports = snap.docs.map(d => {
+    const data = d.data();
+    return {
+      id: d.id,
+      matchId: data.matchId,
+      reporterUid: data.reporterUid,
+      reporterSteamId: data.reporterSteamId,
+      reporterName: data.reporterName,
+      targetSteamId: data.targetSteamId,
+      targetName: data.targetName,
+      reason: data.reason,
+      details: data.details,
+      status: data.status,
+      createdAt: data.createdAt?._seconds ? data.createdAt._seconds * 1000 : null,
+      resolvedAt: data.resolvedAt?._seconds ? data.resolvedAt._seconds * 1000 : null,
+      resolvedAction: data.resolvedAction || null,
+    };
+  });
+  return json(200, { reports, count: reports.length });
+}
+
+// v48-admin-reports: aplica acao no report.
+// Body: { secret, action: 'resolve'|'dismiss'|'ban', banDurationHours: 24 }
+async function handleAdminReportAction(event, reportId) {
+  const body = JSON.parse(event.body || '{}');
+  const expectedSecret = process.env.ADMIN_SECRET || process.env.DEBUG_SECRET || process.env.MATCHZY_WEBHOOK_SECRET || '';
+  if (!expectedSecret || body.secret !== expectedSecret) {
+    return json(401, { error: 'invalid_secret' });
+  }
+  const VALID_ACTIONS = ['resolve', 'dismiss', 'ban'];
+  if (!VALID_ACTIONS.includes(body.action)) return json(400, { error: 'invalid_action' });
+  const db = admin.firestore();
+  const reportRef = db.collection('reports').doc(reportId);
+  const reportSnap = await reportRef.get();
+  if (!reportSnap.exists) return json(404, { error: 'report_not_found' });
+  const report = reportSnap.data();
+
+  // BAN: seta bannedUntil em playerStats/{targetSteamId}
+  if (body.action === 'ban') {
+    const hours = Number(body.banDurationHours || 24);
+    if (!Number.isFinite(hours) || hours <= 0 || hours > 24*365*10) return json(400, { error: 'invalid_duration' });
+    const banUntilMs = Date.now() + hours * 3600 * 1000;
+    await db.collection('playerStats').doc(report.targetSteamId).set({
+      bannedUntil: admin.firestore.Timestamp.fromMillis(banUntilMs),
+      bannedReason: report.reason,
+      bannedReportId: reportId,
+      bannedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, { merge: true });
+    console.log(`[admin] BAN steamId=${report.targetSteamId} por ${hours}h (report ${reportId})`);
+  }
+
+  // Marca o report como resolvido
+  await reportRef.update({
+    status: body.action === 'dismiss' ? 'dismissed' : 'resolved',
+    resolvedAction: body.action,
+    resolvedAt: admin.firestore.FieldValue.serverTimestamp(),
+    banDurationHours: body.action === 'ban' ? Number(body.banDurationHours || 24) : null,
+  });
+
+  return json(200, { ok: true, action: body.action });
+}
+
+// v48-admin-reports: unban manual (remove bannedUntil)
+async function handleAdminUnban(event) {
+  const body = JSON.parse(event.body || '{}');
+  const expectedSecret = process.env.ADMIN_SECRET || process.env.DEBUG_SECRET || process.env.MATCHZY_WEBHOOK_SECRET || '';
+  if (!expectedSecret || body.secret !== expectedSecret) return json(401, { error: 'invalid_secret' });
+  if (!body.steamId) return json(400, { error: 'missing_steamId' });
+  const db = admin.firestore();
+  await db.collection('playerStats').doc(body.steamId).set({
+    bannedUntil: null, bannedReason: null, bannedReportId: null,
+    unbannedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+  console.log(`[admin] UNBAN steamId=${body.steamId}`);
+  return json(200, { ok: true });
+}
+
 
 // ── POST /:id/guard-validate ────────────────────────────────────────
 // GMAX GUARD desktop client chama esse endpoint pra: (1) validar que o
