@@ -97,7 +97,7 @@ async function getAuth(event) {
 // Agora roda no MÁXIMO 1x por minuto. Estado é in-memory na instância do
 // Railway — em deploy/restart reseta, sem problema.
 let _lastCleanupAt = 0;
-const CLEANUP_COOLDOWN_MS = 60 * 1000;
+const CLEANUP_COOLDOWN_MS = 40 * 1000;
 
 // Limpa lobbies expirados — TTL absoluto de 20min desde createdAt.
 // Idempotente. Chamado por GET /list (com throttle de 60s).
