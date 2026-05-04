@@ -53,6 +53,7 @@ setInterval(() => {
 // Middleware
 app.use(cors());
 const pushHandler = require('./functions/push').handler;
+const inventoryHandler = require('./functions/inventory').handler;
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -301,6 +302,11 @@ app.post('/api/push/subscribe',   rateLimit(60000, 30), wrapHandler(pushHandler)
 app.post('/api/push/unsubscribe', rateLimit(60000, 30), wrapHandler(pushHandler));
 app.post('/api/push/test',        rateLimit(60000, 10), wrapHandler(pushHandler));
 app.options('/api/push/*', (req, res) => res.sendStatus(204));
+
+// v49-skins: inventário de skins virtuais
+app.get ('/api/inventory/:steamId', rateLimit(60000, 60), wrapHandler(inventoryHandler));
+app.post('/api/inventory/equip',    rateLimit(60000, 30), wrapHandler(inventoryHandler));
+app.options('/api/inventory/*', (req, res) => res.sendStatus(204));
 app.post('/api/debug/simulate-match', rateLimit(60000, 10), wrapHandler(matchHandler)); // v38-debug: simula match pra validar pipeline MatchZy
 app.get('/api/match/ranking',   rateLimit(60000, 60),  wrapHandler(matchHandler));
 app.get('/api/match/players',   rateLimit(60000, 120), wrapHandler(matchHandler)); // batch stats (level/KDR) pra lobbies
