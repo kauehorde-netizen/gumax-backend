@@ -191,6 +191,86 @@ async function getStockConversionFactor() {
   return baseRate + (cfg.surchargeBRL || 0);
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// BUYBACK PRICING (Gu compra skin do cliente — Vender / Upgrade / Downgrade).
+// Lógica: skins LÍQUIDAS (vendem rápido) sofrem markdown menor; ILÍQUIDAS
+// (encalham) sofrem markdown maior pra cobrir o risco de não conseguir
+// revender. Liquidez é o score `youpin_liquidity` do CSPriceAPI (vem da
+// YouPin nativo, é a melhor proxy de "trades por dia" no mercado chinês).
+//
+// Schema settings/buyback:
+//   markdownLiquidPct    (% abaixo do preço pra skins líquidas)   default 15
+//   markdownIlliquidPct  (% abaixo pra ilíquidas)                  default 25
+//   liquidityThreshold   (corte do youpin_liquidity)               default 50
+// ═══════════════════════════════════════════════════════════════════
+const BUYBACK_DEFAULTS = Object.freeze({
+  markdownLiquidPct: 15,
+  markdownIlliquidPct: 25,
+  liquidityThreshold: 50,
+});
+
+let buybackConfigCache = { data: null, ts: 0 };
+
+async function getBuybackConfig(forceRefresh = false) {
+  if (!forceRefresh && buybackConfigCache.data && Date.now() - buybackConfigCache.ts < CONFIG_TTL) {
+    return buybackConfigCache.data;
+  }
+  try {
+    const admin = require('firebase-admin');
+    const db = admin.firestore();
+    const doc = await db.collection('settings').doc('buyback').get();
+    const raw = doc.exists ? doc.data() : {};
+    const data = { ...BUYBACK_DEFAULTS, ...raw };
+    // Sanitize
+    const ml = parseFloat(data.markdownLiquidPct);
+    data.markdownLiquidPct = (ml >= 0 && ml < 100) ? ml : BUYBACK_DEFAULTS.markdownLiquidPct;
+    const mi = parseFloat(data.markdownIlliquidPct);
+    data.markdownIlliquidPct = (mi >= 0 && mi < 100) ? mi : BUYBACK_DEFAULTS.markdownIlliquidPct;
+    const lt = parseFloat(data.liquidityThreshold);
+    data.liquidityThreshold = (lt >= 0) ? lt : BUYBACK_DEFAULTS.liquidityThreshold;
+    buybackConfigCache = { data, ts: Date.now() };
+    return data;
+  } catch (e) {
+    console.error('[Buyback Config] error:', e.message);
+    return { ...BUYBACK_DEFAULTS };
+  }
+}
+
+async function setBuybackConfig({ markdownLiquidPct, markdownIlliquidPct, liquidityThreshold }, updatedBy = 'admin') {
+  const admin = require('firebase-admin');
+  const db = admin.firestore();
+  const patch = { updatedAt: new Date().toISOString(), updatedBy };
+  if (markdownLiquidPct !== undefined) {
+    const v = parseFloat(markdownLiquidPct);
+    if (!(v >= 0 && v < 100)) throw new Error('markdownLiquidPct must be between 0 and 99');
+    patch.markdownLiquidPct = v;
+  }
+  if (markdownIlliquidPct !== undefined) {
+    const v = parseFloat(markdownIlliquidPct);
+    if (!(v >= 0 && v < 100)) throw new Error('markdownIlliquidPct must be between 0 and 99');
+    patch.markdownIlliquidPct = v;
+  }
+  if (liquidityThreshold !== undefined) {
+    const v = parseFloat(liquidityThreshold);
+    if (!(v >= 0)) throw new Error('liquidityThreshold must be >= 0');
+    patch.liquidityThreshold = v;
+  }
+  await db.collection('settings').doc('buyback').set(patch, { merge: true });
+  buybackConfigCache = { data: null, ts: 0 };
+  return getBuybackConfig(true);
+}
+
+// Decide o markdown a aplicar dado o liquidity score do item.
+// Retorna { tier: 'liquid'|'illiquid', markdownPct: number }.
+async function pickBuybackMarkdown(liquidityScore) {
+  const cfg = await getBuybackConfig();
+  const score = Number(liquidityScore) || 0;
+  if (score >= cfg.liquidityThreshold) {
+    return { tier: 'liquid', markdownPct: cfg.markdownLiquidPct, threshold: cfg.liquidityThreshold };
+  }
+  return { tier: 'illiquid', markdownPct: cfg.markdownIlliquidPct, threshold: cfg.liquidityThreshold };
+}
+
 exports.getPricingConfig = getPricingConfig;
 exports.setPricingConfig = setPricingConfig;
 exports.getConversionFactor = getConversionFactor;
@@ -203,3 +283,7 @@ exports.getStockPricingConfig = getStockPricingConfig;
 exports.setStockPricingConfig = setStockPricingConfig;
 exports.getStockConversionFactor = getStockConversionFactor;
 exports.STOCK_DEFAULTS = STOCK_DEFAULTS;
+exports.getBuybackConfig = getBuybackConfig;
+exports.setBuybackConfig = setBuybackConfig;
+exports.pickBuybackMarkdown = pickBuybackMarkdown;
+exports.BUYBACK_DEFAULTS = BUYBACK_DEFAULTS;

@@ -447,6 +447,48 @@ exports.handler = async (event) => {
       }
     }
 
+    // ═══ GET BUYBACK CONFIG (markdown por liquidez) ═══
+    // v2-liquidity: pricing diferenciado pra recompra. Retorna a config atual
+    // + um preview mostrando como ficaria em uma skin de R$ 1.000 nos 2 tiers.
+    if (action === 'get-buyback-config') {
+      const { getBuybackConfig } = require('./pricing');
+      const cfg = await getBuybackConfig(true);
+      const liquidMul = (100 - cfg.markdownLiquidPct) / 100;
+      const illiquidMul = (100 - cfg.markdownIlliquidPct) / 100;
+      return {
+        statusCode: 200, headers: H,
+        body: JSON.stringify({
+          success: true,
+          config: cfg,
+          preview: {
+            example: 1000,
+            offerLiquid:   Math.round(1000 * liquidMul * 100) / 100,
+            offerIlliquid: Math.round(1000 * illiquidMul * 100) / 100,
+          },
+        }),
+      };
+    }
+
+    // ═══ UPDATE BUYBACK CONFIG ═══
+    // body: { markdownLiquidPct?, markdownIlliquidPct?, liquidityThreshold? }
+    if (action === 'update-buyback-config') {
+      const { setBuybackConfig } = require('./pricing');
+      const { markdownLiquidPct, markdownIlliquidPct, liquidityThreshold } = body;
+      try {
+        const cfg = await setBuybackConfig(
+          { markdownLiquidPct, markdownIlliquidPct, liquidityThreshold },
+          'admin'
+        );
+        console.log('[Admin] Updated buyback config:', cfg);
+        return {
+          statusCode: 200, headers: H,
+          body: JSON.stringify({ success: true, config: cfg }),
+        };
+      } catch (e) {
+        return { statusCode: 400, headers: H, body: JSON.stringify({ error: e.message }) };
+      }
+    }
+
     // ═══ BUYBACK — LIST TRANSACTIONS ═══
     // Retorna todas as transações (ou filtradas por status).
     if (action === 'buyback-list') {

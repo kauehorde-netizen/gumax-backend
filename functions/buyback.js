@@ -68,14 +68,13 @@ async function fetchSteamMarketBRL(marketHashName) {
 }
 
 // Calcula proposta de compra pra UMA skin.
-// Retorna { name, youpinCNY, buffCNY, cheapestCNY, offerCNY, offerBRL, iconUrl }.
-//
-// FALLBACK: se CSPriceAPI não retornou preço (key não configurada / catálogo
-// vazio), tenta Steam Market priceoverview pra ainda dar uma cotação.
+// v2-liquidity: agora o markdown depende da liquidez (youpin_liquidity).
+// Skins líquidas (vendem rápido) → 15% off (default). Ilíquidas → 25% off.
+// Tudo configurável via settings/buyback no Firestore.
 async function quoteItem(marketHashName) {
   const item = await getItemPrices(marketHashName);
   const { buildIconUrl } = require('./cspriceapi');
-  const { getBaseFactor: getBaseFactorPricing } = require('./pricing');
+  const { getBaseFactor: getBaseFactorPricing, pickBuybackMarkdown } = require('./pricing');
 
   const extractPrice = (v) => {
     if (v == null) return 0;
@@ -92,22 +91,31 @@ async function quoteItem(marketHashName) {
   const buffCNY   = item ? extractPrice(item.buff)   : 0;
   const available = [youpinCNY, buffCNY].filter(p => p > 0);
   const cheapestCNY = available.length ? Math.min(...available) : 0;
-  const offerCNY = cheapestCNY > 0 ? cheapestCNY * 0.85 : 0;
+
+  // v2-liquidity: pega liquidity do CSPriceAPI (vem do YouPin nativo) e
+  // decide qual markdown aplicar. Sem item / sem score → trata como ilíquida
+  // (mais conservador — protege a Gumax de pagar caro em skin que encalha).
+  const liquidityScore = item ? (Number(item.youpin_liquidity) || 0) : 0;
+  const { tier, markdownPct, threshold } = await pickBuybackMarkdown(liquidityScore);
+  const multiplier = (100 - markdownPct) / 100;            // ex: 15% off = 0.85
+  const offerCNY = cheapestCNY > 0 ? cheapestCNY * multiplier : 0;
   const factor = await getBaseFactorPricing();
   let offerBRL = offerCNY > 0 ? Math.round(offerCNY * factor * 100) / 100 : 0;
   let usedFallback = false;
 
-  // FALLBACK Steam Market quando CSPriceAPI vazio
+  // FALLBACK Steam Market quando CSPriceAPI vazio.
+  // Aqui tratamos como ILÍQUIDA por padrão — se nem o CSPriceAPI tem,
+  // a skin não está nem nos top mercados chineses, sinal forte de baixa liquidez.
   if (offerBRL <= 0) {
     const steamBRL = await fetchSteamMarketBRL(marketHashName);
     if (steamBRL > 0) {
-      // Steam é o preço de mercado/lowest listing — pra recompra, oferta 15% abaixo
-      offerBRL = Math.round(steamBRL * 0.85 * 100) / 100;
+      const fallbackMultiplier = (100 - markdownPct) / 100; // mesmo multiplier
+      offerBRL = Math.round(steamBRL * fallbackMultiplier * 100) / 100;
       usedFallback = true;
     }
   }
 
-  if (offerBRL <= 0) return null;  // realmente não temos preço de lugar nenhum
+  if (offerBRL <= 0) return null;
 
   return {
     name: (item && item.market_hash_name) || marketHashName,
@@ -116,6 +124,11 @@ async function quoteItem(marketHashName) {
     cheapestSource: usedFallback ? 'steam_market' : (cheapestCNY === youpinCNY ? 'youpin' : 'buff'),
     iconUrl: item ? buildIconUrl(item.icon) : '',
     fallback: usedFallback || undefined,
+    // v2-liquidity: campos novos pra UI mostrar tier + porcentagem
+    liquidity: liquidityScore,
+    liquidityTier: tier,             // 'liquid' | 'illiquid'
+    markdownPct,                     // % aplicada (15 ou 25 default)
+    liquidityThreshold: threshold,
   };
 }
 
