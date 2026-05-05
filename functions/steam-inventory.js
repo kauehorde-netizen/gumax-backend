@@ -101,6 +101,62 @@ async function fetchInventory(steamId) {
   return await httpGetJson(url, { timeout: 20000 });
 }
 
+// v2-bot-fallback: tenta o Steam Bot (logado) primeiro quando temos tradeLink.
+// O bot consegue ler inventários privados, retorna mais detalhes (stickers,
+// custom names, floats), e contorna rate limit da API pública. Se falhar, cai
+// pra API pública. Bot só ativa quando STEAM_BOT_REFRESH_TOKEN está setado.
+async function fetchInventoryWithBot(steamId, tradeLink) {
+  const hasBotEnv = !!(process.env.STEAM_BOT_REFRESH_TOKEN ||
+                       (process.env.STEAM_BOT_USERNAME && process.env.STEAM_BOT_PASSWORD));
+  if (hasBotEnv && tradeLink && tradeLink.includes('partner=')) {
+    try {
+      const { getPartnerInventory } = require('./steam-bot');
+      const items = await getPartnerInventory(tradeLink);
+      if (items && items.length > 0) {
+        // Converte pro mesmo formato que o /inventory/ retorna
+        const assets = [];
+        const descByKey = new Map();
+        for (const it of items) {
+          const cid = String(it.classid || '0'), iid = String(it.instanceid || '0');
+          assets.push({
+            appid: 730,
+            contextid: '2',
+            assetid: String(it.assetid),
+            classid: cid,
+            instanceid: iid,
+            amount: String(it.amount || 1),
+          });
+          const dk = `${cid}_${iid}`;
+          if (!descByKey.has(dk)) {
+            descByKey.set(dk, {
+              appid: 730,
+              classid: cid,
+              instanceid: iid,
+              icon_url: it.icon_url || '',
+              name: it.name || '',
+              market_hash_name: it.market_hash_name || '',
+              type: it.type || '',
+              tradable: it.tradable ?? 1,
+              marketable: it.marketable ?? 1,
+              tags: it.tags || [],
+              actions: it.actions || [],
+              descriptions: it.descriptions || [],
+            });
+          }
+        }
+        console.log(`[steam-inventory] Bot returned ${assets.length} assets, ${descByKey.size} descs`);
+        return { assets, descriptions: Array.from(descByKey.values()), success: 1, _source: 'steam-bot' };
+      }
+    } catch (e) {
+      console.warn(`[steam-inventory] Bot failed (${e.message}), falling back to public API`);
+    }
+  }
+  // Fallback: API pública. Joga o erro original (403/429/etc) se cair.
+  const inv = await fetchInventory(steamId);
+  if (inv) inv._source = 'public_api';
+  return inv;
+}
+
 // Cotação CNY→BRL (Pricempire retorna em CNY)
 async function fetchCnyBrl() {
   if (global._cnyBrlCache && Date.now() - global._cnyBrlCache.ts < 60 * 60 * 1000) {
@@ -376,13 +432,16 @@ exports.handler = async (event) => {
   if (event.httpMethod === 'GET') {
     const q = event.queryStringParameters || {};
     const steamId = String(q.steamId || '').trim();
+    // v2-bot: tradeLink opcional — quando vem, ativa o Steam Bot (lê inventário
+    // privado + traz stickers/floats/custom names que a API pública esconde).
+    const tradeLink = String(q.tradeLink || '').trim();
     if (!/^\d{17}$/.test(steamId)) {
       return json(400, { error: 'steamId precisa ser um SteamID64 (17 dígitos)' });
     }
     try {
-      const inv = await fetchInventory(steamId);
+      const inv = await fetchInventoryWithBot(steamId, tradeLink);
       const items = normalizeInventoryItems(inv);
-      return json(200, { steamId, count: items.length, items });
+      return json(200, { steamId, count: items.length, items, source: inv._source || 'public_api' });
     } catch (e) {
       const code = e.status === 403 ? 403 : (e.status === 429 ? 429 : 500);
       console.error(`[steam-inventory] ${steamId} ${e.message}`, e.bodySample || '');
@@ -391,7 +450,7 @@ exports.handler = async (event) => {
         steamId,
         hint: e.status === 400
           ? 'Steam rejeitou a request. Verifica se o inventário tá público (Steam → Perfil → Editar Perfil → Privacidade → Inventário: Público).'
-          : (e.status === 403 ? 'Inventário privado' : undefined),
+          : (e.status === 403 ? 'Inventário privado — passe tradeLink pra usar o bot' : undefined),
         debug: e.bodySample || undefined,
       });
     }
