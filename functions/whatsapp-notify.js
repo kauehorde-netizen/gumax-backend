@@ -14,6 +14,25 @@
 
 const ADMIN_NUMBER = process.env.GUMAX_ADMIN_WHATSAPP || ''; // E.164 sem '+', ex: '5521967298333'
 
+// v3-debug: log diagnóstico no startup pra verificar se Node tá enxergando as
+// env vars do WhatsApp. Imprime os NOMES detectados (não os valores) e o
+// tamanho do token (pra saber se é um valor real e não vazio/com whitespace).
+(function logWhatsAppEnvDebug() {
+  const TOKEN = process.env.WA_CLOUD_TOKEN || process.env.WHATSAPP_CLOUD_TOKEN
+             || process.env.WHATSAPP_TOKEN || process.env.META_WA_TOKEN;
+  const PHONEID = process.env.WA_CLOUD_PHONE_ID || process.env.WHATSAPP_PHONE_NUMBER_ID
+               || process.env.WHATSAPP_PHONE_ID || process.env.META_WA_PHONE_ID;
+  const status = {
+    cloud_token_set: !!TOKEN,
+    cloud_token_len: TOKEN ? TOKEN.length : 0,
+    cloud_phone_id_set: !!PHONEID,
+    cloud_phone_id_value: PHONEID || '<missing>',
+    admin_number: ADMIN_NUMBER || '<missing>',
+    zapi_set: !!(process.env.ZAPI_INSTANCE && process.env.ZAPI_TOKEN),
+  };
+  console.log('[WA notify] startup config:', JSON.stringify(status));
+})();
+
 // ── Provider: WhatsApp Cloud API (Meta) ───────────────────────────────────
 async function sendViaCloud(toE164, text) {
   // Aceita várias convenções de nome (WA_*, WHATSAPP_CLOUD_TOKEN, etc)
