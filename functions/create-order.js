@@ -268,6 +268,61 @@ exports.handler = async (event) => {
     // Generate order ID
     const orderId = generateOrderId();
 
+    // ── v6-stock-reserve: RESERVA atômica de skins Full ─────────────────────
+    // Skins de estoque Gu (delivery=full ou source=full) são únicas — quando
+    // alguém compra, sumir do marketplace pra outros não comprarem a mesma.
+    // Skins Youpin (Normal) NÃO precisam reservar — Youpin tem oferta gigante.
+    //
+    // Estratégia: transação Firestore que checa cada stock.inStock === true,
+    // marca inStock=false + reservedByOrder=orderId. Se algum item já tiver
+    // sido vendido (race com outro cliente), aborta o pedido inteiro.
+    {
+      const adminFb = require('firebase-admin');
+      const dbReserve = adminFb.firestore();
+      const fullItems = items.filter(it =>
+        (it.delivery === 'full' || it.source === 'full') && it.id
+      );
+      if (fullItems.length > 0) {
+        try {
+          await dbReserve.runTransaction(async (tx) => {
+            // 1. Lê todos os stocks
+            const reads = await Promise.all(
+              fullItems.map(it => tx.get(dbReserve.collection('stock').doc(it.id)))
+            );
+            // 2. Valida disponibilidade
+            for (let i = 0; i < reads.length; i++) {
+              const snap = reads[i];
+              const it = fullItems[i];
+              if (!snap.exists) {
+                throw new Error(`Skin "${it.name}" não está mais no estoque (item removido).`);
+              }
+              const data = snap.data();
+              if (data.inStock === false || data.active === false) {
+                throw new Error(`Skin "${it.name}" acabou de ser comprada por outro cliente. Dá uma atualizada na página.`);
+              }
+            }
+            // 3. Marca como reservada
+            const now = new Date().toISOString();
+            for (const it of fullItems) {
+              tx.update(dbReserve.collection('stock').doc(it.id), {
+                inStock: false,
+                active: false,
+                reservedByOrder: orderId,
+                reservedAt: now,
+              });
+            }
+          });
+          console.log(`[CreateOrder] Reserved ${fullItems.length} stock items for ${orderId}`);
+        } catch (e) {
+          console.warn(`[CreateOrder] Stock reservation failed for ${orderId}:`, e.message);
+          return { statusCode: 409, headers: H, body: JSON.stringify({
+            error: e.message,
+            code: 'stock_unavailable',
+          }) };
+        }
+      }
+    }
+
     // ── Roteia por método de pagamento ──
     let payment;
     if (paymentMethod === 'pix') {
