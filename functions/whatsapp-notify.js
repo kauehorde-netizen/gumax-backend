@@ -16,8 +16,16 @@ const ADMIN_NUMBER = process.env.GUMAX_ADMIN_WHATSAPP || ''; // E.164 sem '+', e
 
 // ── Provider: WhatsApp Cloud API (Meta) ───────────────────────────────────
 async function sendViaCloud(toE164, text) {
-  const TOKEN   = process.env.WA_CLOUD_TOKEN;
-  const PHONEID = process.env.WA_CLOUD_PHONE_ID;
+  // Aceita várias convenções de nome (WA_*, WHATSAPP_CLOUD_TOKEN, etc)
+  // pra evitar quebrar quando admin setou com nome levemente diferente.
+  const TOKEN = process.env.WA_CLOUD_TOKEN
+             || process.env.WHATSAPP_CLOUD_TOKEN
+             || process.env.WHATSAPP_TOKEN
+             || process.env.META_WA_TOKEN;
+  const PHONEID = process.env.WA_CLOUD_PHONE_ID
+               || process.env.WHATSAPP_PHONE_NUMBER_ID
+               || process.env.WHATSAPP_PHONE_ID
+               || process.env.META_WA_PHONE_ID;
   if (!TOKEN || !PHONEID) return { sent: false, reason: 'cloud not configured' };
   const url = `https://graph.facebook.com/v18.0/${PHONEID}/messages`;
   const body = {
