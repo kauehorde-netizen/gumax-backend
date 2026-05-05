@@ -389,17 +389,26 @@ function normalizeInventoryItems(inventory) {
   for (const d of inventory.descriptions) {
     descByKey[`${d.classid}_${d.instanceid}`] = d;
   }
+  // v3-tradable-relax: helper aceita 1 / "1" / true / "true" pra evitar de filtrar
+  // skins caras quando o Steam retorna tradable como string. Trade endpoint
+  // (via bot) costuma retornar string; API pública retorna number.
+  const isTradable = (v) => v === 1 || v === '1' || v === true || v === 'true';
+
   const items = [];
   for (const asset of inventory.assets) {
     const key = `${asset.classid}_${asset.instanceid}`;
     const desc = descByKey[key];
     if (!desc) continue;
-    // Só items tradable e marketable
-    if (desc.tradable !== 1 && desc.tradable !== true) continue;
-    if (desc.marketable !== 1 && desc.marketable !== true) continue;
 
     const marketHashName = desc.market_hash_name || desc.market_name || desc.name || '';
     if (!marketHashName) continue;
+
+    // v3-tradable-relax: NÃO descartamos mais por tradable=0 ou marketable=0.
+    // Skin com trade hold (tradable=0 temporariamente) ou skin não-marketable
+    // (custom name tag, sticker crafted, etc.) é uma skin VÁLIDA pra cotação —
+    // só não pode ser entregue agora. Frontend decide se mostra ou não.
+    const tradable = isTradable(desc.tradable);
+    const marketable = isTradable(desc.marketable);
 
     items.push({
       assetid: asset.assetid,
@@ -413,8 +422,8 @@ function normalizeInventoryItems(inventory) {
       iconUrl: desc.icon_url
         ? `https://community.cloudflare.steamstatic.com/economy/image/${desc.icon_url}/256fx256f`
         : '',
-      tradable: true,
-      marketable: true,
+      tradable,
+      marketable,
     });
   }
   return items;
