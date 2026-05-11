@@ -78,6 +78,28 @@ app.get('/health', (req, res) => res.json({
   }
 }));
 
+// v1-health: endpoint padrão pra UptimeRobot/monitoring + info de RAM.
+// Retorna 200 se vivo, sempre. Incluímos memória pra detectar risk de OOM
+// (Railway free era 512MB, agora Hobby = 8GB). Se rss passar de 70% do limit,
+// hora de investigar leak.
+app.get('/api/health', (req, res) => {
+  const mem = process.memoryUsage();
+  const fmt = (b) => Math.round(b / 1024 / 1024) + 'MB';
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    uptimeSec: Math.floor(process.uptime()),
+    memory: {
+      rss: fmt(mem.rss),                    // total processo (mais perto do que Railway mede)
+      heapUsed: fmt(mem.heapUsed),
+      heapTotal: fmt(mem.heapTotal),
+      external: fmt(mem.external),
+    },
+    node: process.version,
+    env: process.env.NODE_ENV || 'unknown',
+  });
+});
+
 // ── Wrapper: converts Express req/res to handler format ──
 function wrapHandler(handler) {
   return async (req, res) => {
