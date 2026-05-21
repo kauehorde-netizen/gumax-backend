@@ -19,6 +19,15 @@ if (!admin.apps.length) {
     credential: admin.credential.cert(serviceAccount),
     projectId: serviceAccount.project_id || 'gumax-skins',
   });
+  // v1-undef-fix: Firestore rejeita `undefined` em writes por padrão e isso
+  // sempre derruba o fluxo de upgrade/downgrade quando algum quote vem sem
+  // `.fallback`/`.icon`. Ligamos ignoreUndefinedProperties pra que campos
+  // undefined sejam silenciosamente removidos do documento (preserva null).
+  try {
+    admin.firestore().settings({ ignoreUndefinedProperties: true });
+  } catch (e) {
+    console.warn('[Firebase] settings() ignoreUndefinedProperties skip:', e.message);
+  }
   console.log('[Firebase] Admin SDK initialized for project:', serviceAccount.project_id || 'gumax-skins');
 }
 

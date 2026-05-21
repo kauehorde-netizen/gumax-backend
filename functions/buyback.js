@@ -123,7 +123,7 @@ async function quoteItem(marketHashName) {
     offerCNY, offerBRL,
     cheapestSource: usedFallback ? 'steam_market' : (cheapestCNY === youpinCNY ? 'youpin' : 'buff'),
     iconUrl: item ? buildIconUrl(item.icon) : '',
-    fallback: usedFallback || undefined,
+    fallback: !!usedFallback,
     // v2-liquidity: campos novos pra UI mostrar tier + porcentagem
     liquidity: liquidityScore,
     liquidityTier: tier,             // 'liquid' | 'illiquid'
